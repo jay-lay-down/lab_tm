@@ -9,6 +9,7 @@ from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib import cm, colors
 from matplotlib import font_manager as fm
 import networkx as nx
 import pandas as pd
@@ -430,7 +431,14 @@ class TextMiningApp(QMainWindow):
         top.setFixedHeight(80)
         top_layout = QGridLayout(top)
         self.cb_granularity = QComboBox()
-        self.cb_granularity.addItems(["일", "주", "월", "분기", "연도"])
+        self.cb_granularity.addItems(["연도", "월"])
+        self.cb_buzz_period_unit = self.cb_granularity
+        self.cb_buzz_period_value = QComboBox()
+        self.cb_buzz_period_unit.currentIndexChanged.connect(
+            lambda: self.populate_period_values(
+                self.cb_buzz_period_unit, self.cb_buzz_period_value, self.df_clean
+            )
+        )
         self.chk_split_by_page_type = QCheckBox("page_type 분리")
         self.cb_page_type_filter = QComboBox()
         self.cb_page_type_filter.addItem("전체")
@@ -439,13 +447,16 @@ class TextMiningApp(QMainWindow):
         self.btn_refresh_buzz = QPushButton("버즈 계산")
         self.btn_refresh_buzz.clicked.connect(self.build_buzz)
 
-        top_layout.addWidget(self.cb_granularity, 0, 0)
-        top_layout.addWidget(self.chk_split_by_page_type, 0, 1)
-        top_layout.addWidget(QLabel("page_type"), 0, 2)
-        top_layout.addWidget(self.cb_page_type_filter, 0, 3)
-        top_layout.addWidget(QLabel("지표"), 0, 4)
-        top_layout.addWidget(self.cb_buzz_metric, 0, 5)
-        top_layout.addWidget(self.btn_refresh_buzz, 0, 6)
+        top_layout.addWidget(QLabel("기간 단위"), 0, 0)
+        top_layout.addWidget(self.cb_granularity, 0, 1)
+        top_layout.addWidget(QLabel("기간 선택"), 0, 2)
+        top_layout.addWidget(self.cb_buzz_period_value, 0, 3)
+        top_layout.addWidget(self.chk_split_by_page_type, 0, 4)
+        top_layout.addWidget(QLabel("page_type"), 0, 5)
+        top_layout.addWidget(self.cb_page_type_filter, 0, 6)
+        top_layout.addWidget(QLabel("지표"), 0, 7)
+        top_layout.addWidget(self.cb_buzz_metric, 0, 8)
+        top_layout.addWidget(self.btn_refresh_buzz, 0, 9)
 
         layout.addWidget(top)
 
@@ -535,6 +546,8 @@ class TextMiningApp(QMainWindow):
         self.tbl_token_sample.setColumnCount(2)
         self.tbl_token_sample.setHorizontalHeaderLabels(["token", "count"])
         self.tbl_token_sample.horizontalHeader().setStretchLastSection(True)
+        self.tbl_token_sample.setSelectionBehavior(QTableWidget.SelectRows)
+        self.tbl_token_sample.setSelectionMode(QTableWidget.ExtendedSelection)
         self.tbl_token_sample.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tbl_token_sample.customContextMenuRequested.connect(self.show_token_menu)
 
@@ -550,12 +563,27 @@ class TextMiningApp(QMainWindow):
         top = QWidget()
         top.setFixedHeight(70)
         top_layout = QGridLayout(top)
+        self.cb_wc_period_unit = QComboBox()
+        self.cb_wc_period_unit.addItems(["연도", "월"])
+        self.cb_wc_period_value = QComboBox()
+        self.cb_wc_period_unit.currentIndexChanged.connect(
+            lambda: self.populate_period_values(
+                self.cb_wc_period_unit, self.cb_wc_period_value, self.df_clean
+            )
+        )
         self.cb_wc_topn = QComboBox()
-        self.cb_wc_topn.addItems(["30", "50", "100", "200"])
+        self.cb_wc_topn.addItems(["30", "50", "100", "200", "500", "1000", "2000"])
         self.btn_build_wc = QPushButton("워드클라우드 생성")
         self.btn_build_wc.clicked.connect(self.build_wordcloud)
-        top_layout.addWidget(self.cb_wc_topn, 0, 0)
-        top_layout.addWidget(self.btn_build_wc, 0, 1)
+        self.lbl_wc_count = QLabel("토큰 0 / 고유 0")
+        top_layout.addWidget(QLabel("기간 단위"), 0, 0)
+        top_layout.addWidget(self.cb_wc_period_unit, 0, 1)
+        top_layout.addWidget(QLabel("기간 선택"), 0, 2)
+        top_layout.addWidget(self.cb_wc_period_value, 0, 3)
+        top_layout.addWidget(QLabel("Top N"), 0, 4)
+        top_layout.addWidget(self.cb_wc_topn, 0, 5)
+        top_layout.addWidget(self.btn_build_wc, 0, 6)
+        top_layout.addWidget(self.lbl_wc_count, 0, 7)
 
         layout.addWidget(top)
 
@@ -587,6 +615,14 @@ class TextMiningApp(QMainWindow):
         top_layout = QGridLayout(top)
         self.btn_build_graph = QPushButton("그래프 생성(전체)")
         self.btn_build_graph.clicked.connect(self.build_network)
+        self.cb_network_period_unit = QComboBox()
+        self.cb_network_period_unit.addItems(["연도", "월"])
+        self.cb_network_period_value = QComboBox()
+        self.cb_network_period_unit.currentIndexChanged.connect(
+            lambda: self.populate_period_values(
+                self.cb_network_period_unit, self.cb_network_period_value, self.df_clean
+            )
+        )
         self.cb_mode = QComboBox()
         self.cb_mode.addItems(["기본", "고급"])
         self.cb_mode.currentIndexChanged.connect(self.toggle_network_advanced)
@@ -599,8 +635,8 @@ class TextMiningApp(QMainWindow):
         self.sb_min_edge_weight.setValue(3)
         self.lbl_min_edge = QLabel("엣지 최소 가중치")
         self.sb_max_nodes = QSpinBox()
-        self.sb_max_nodes.setRange(50, 5000)
-        self.sb_max_nodes.setValue(1000)
+        self.sb_max_nodes.setRange(10, 300)
+        self.sb_max_nodes.setValue(60)
         self.lbl_max_nodes = QLabel("최대 노드 수")
 
         self.le_node_search = QLineEdit()
@@ -628,24 +664,28 @@ class TextMiningApp(QMainWindow):
             "min_edge_weight ≥ 5를 권장합니다. (데이터가 작을수록 필터를 높이세요)"
         )
 
-        top_layout.addWidget(self.btn_build_graph, 0, 0)
-        top_layout.addWidget(self.cb_mode, 0, 1)
-        top_layout.addWidget(self.lbl_min_node, 0, 2)
-        top_layout.addWidget(self.sb_min_node_count, 0, 3)
-        top_layout.addWidget(self.lbl_min_edge, 0, 4)
-        top_layout.addWidget(self.sb_min_edge_weight, 0, 5)
-        top_layout.addWidget(self.lbl_max_nodes, 0, 6)
-        top_layout.addWidget(self.sb_max_nodes, 0, 7)
-        top_layout.addWidget(self.le_node_search, 1, 0)
-        top_layout.addWidget(self.btn_add_seed, 1, 1)
-        top_layout.addWidget(self.cb_hop_depth, 1, 2)
-        top_layout.addWidget(self.btn_apply_hop, 1, 3)
-        top_layout.addWidget(self.btn_reset_view, 1, 4)
+        top_layout.addWidget(QLabel("기간 단위"), 0, 0)
+        top_layout.addWidget(self.cb_network_period_unit, 0, 1)
+        top_layout.addWidget(QLabel("기간 선택"), 0, 2)
+        top_layout.addWidget(self.cb_network_period_value, 0, 3)
+        top_layout.addWidget(self.btn_build_graph, 0, 4)
+        top_layout.addWidget(self.cb_mode, 0, 5)
+        top_layout.addWidget(self.lbl_min_node, 0, 6)
+        top_layout.addWidget(self.sb_min_node_count, 0, 7)
+        top_layout.addWidget(self.lbl_min_edge, 0, 8)
+        top_layout.addWidget(self.sb_min_edge_weight, 0, 9)
+        top_layout.addWidget(self.lbl_max_nodes, 0, 10)
+        top_layout.addWidget(self.sb_max_nodes, 0, 11)
+        top_layout.addWidget(self.le_node_search, 1, 0, 1, 2)
+        top_layout.addWidget(self.btn_add_seed, 1, 2)
+        top_layout.addWidget(self.cb_hop_depth, 1, 3)
+        top_layout.addWidget(self.btn_apply_hop, 1, 4)
+        top_layout.addWidget(self.btn_reset_view, 1, 5)
         top_layout.addWidget(self.cb_cooc_scope, 2, 0, 1, 2)
         top_layout.addWidget(self.cb_weight_mode, 2, 2, 1, 2)
         top_layout.addWidget(self.chk_drag_mode, 2, 4)
-        top_layout.addWidget(self.lbl_network_reco, 2, 5, 1, 3)
-        top_layout.addWidget(self.lbl_advanced_hint, 2, 8)
+        top_layout.addWidget(self.lbl_network_reco, 2, 5, 1, 4)
+        top_layout.addWidget(self.lbl_advanced_hint, 2, 9, 1, 3)
 
         splitter.addWidget(top)
 
@@ -685,11 +725,23 @@ class TextMiningApp(QMainWindow):
         top = QWidget()
         top.setFixedHeight(120)
         top_layout = QGridLayout(top)
+        self.cb_sent_period_unit = QComboBox()
+        self.cb_sent_period_unit.addItems(["연도", "월"])
+        self.cb_sent_period_value = QComboBox()
+        self.cb_sent_period_unit.currentIndexChanged.connect(
+            lambda: (
+                self.populate_period_values(
+                    self.cb_sent_period_unit, self.cb_sent_period_value, self.df_clean
+                ),
+                self.update_sentiment_view(),
+            )
+        )
+        self.cb_sent_period_value.currentIndexChanged.connect(self.update_sentiment_view)
         self.cb_sent_mode = QComboBox()
         self.cb_sent_mode.addItems(["전체 감성", "사전별 감성"])
         self.cb_sent_mode.currentIndexChanged.connect(self.update_sentiment_view)
         self.cb_sent_view = QComboBox()
-        self.cb_sent_view.addItems(["전체", "월별", "채널별"])
+        self.cb_sent_view.addItems(["연도별", "월별"])
         self.cb_sent_view.currentIndexChanged.connect(self.update_sentiment_view)
         self.cb_sent_metric = QComboBox()
         self.cb_sent_metric.addItems(["count", "%"])
@@ -702,17 +754,21 @@ class TextMiningApp(QMainWindow):
         self.btn_run_sentiment = QPushButton("감성분석 실행")
         self.btn_run_sentiment.clicked.connect(self.run_sentiment)
 
-        top_layout.addWidget(QLabel("모드"), 0, 0)
-        top_layout.addWidget(self.cb_sent_mode, 0, 1)
-        top_layout.addWidget(QLabel("보기"), 0, 2)
-        top_layout.addWidget(self.cb_sent_view, 0, 3)
-        top_layout.addWidget(QLabel("지표"), 0, 4)
-        top_layout.addWidget(self.cb_sent_metric, 0, 5)
-        top_layout.addWidget(QLabel("문장 분리"), 0, 6)
-        top_layout.addWidget(self.cb_sentence_split, 0, 7)
-        top_layout.addWidget(self.btn_run_sentiment, 0, 8)
-        top_layout.addWidget(QLabel("토픽"), 1, 0)
-        top_layout.addWidget(self.cb_brand_filter, 1, 1, 1, 2)
+        top_layout.addWidget(QLabel("기간 단위"), 0, 0)
+        top_layout.addWidget(self.cb_sent_period_unit, 0, 1)
+        top_layout.addWidget(QLabel("기간 선택"), 0, 2)
+        top_layout.addWidget(self.cb_sent_period_value, 0, 3)
+        top_layout.addWidget(QLabel("모드"), 0, 4)
+        top_layout.addWidget(self.cb_sent_mode, 0, 5)
+        top_layout.addWidget(QLabel("보기"), 0, 6)
+        top_layout.addWidget(self.cb_sent_view, 0, 7)
+        top_layout.addWidget(QLabel("지표"), 0, 8)
+        top_layout.addWidget(self.cb_sent_metric, 0, 9)
+        top_layout.addWidget(QLabel("문장 분리"), 1, 0)
+        top_layout.addWidget(self.cb_sentence_split, 1, 1)
+        top_layout.addWidget(self.btn_run_sentiment, 1, 2)
+        top_layout.addWidget(QLabel("토픽"), 1, 3)
+        top_layout.addWidget(self.cb_brand_filter, 1, 4, 1, 2)
 
         layout.addWidget(top)
 
@@ -799,6 +855,49 @@ class TextMiningApp(QMainWindow):
             self.tabs.setTabEnabled(idx, enabled)
         if not enabled:
             self.statusBar().showMessage("데이터 로드 후 전처리를 적용해주세요.")
+        self.refresh_period_filters()
+
+    def populate_period_values(self, unit_combo: QComboBox, value_combo: QComboBox, df: pd.DataFrame | None):
+        value_combo.blockSignals(True)
+        value_combo.clear()
+        value_combo.addItem("전체")
+        if df is None or df.empty or "date" not in df.columns:
+            value_combo.blockSignals(False)
+            return
+        dates = df["date"].dropna()
+        if dates.empty:
+            value_combo.blockSignals(False)
+            return
+        unit = unit_combo.currentText()
+        if unit == "연도":
+            values = sorted({str(val.year) for val in dates})
+        else:
+            values = sorted({val.strftime("%Y-%m") for val in dates})
+        for value in values:
+            value_combo.addItem(value)
+        value_combo.blockSignals(False)
+
+    def refresh_period_filters(self):
+        df = self.df_clean
+        for unit_combo, value_combo in [
+            (self.cb_buzz_period_unit, self.cb_buzz_period_value),
+            (self.cb_wc_period_unit, self.cb_wc_period_value),
+            (self.cb_network_period_unit, self.cb_network_period_value),
+            (self.cb_sent_period_unit, self.cb_sent_period_value),
+        ]:
+            self.populate_period_values(unit_combo, value_combo, df)
+
+    def filter_df_by_period(self, df: pd.DataFrame, unit_combo: QComboBox, value_combo: QComboBox):
+        if df is None or df.empty or "date" not in df.columns:
+            return df
+        unit = unit_combo.currentText()
+        value = value_combo.currentText()
+        if value == "전체":
+            return df
+        dates = df["date"]
+        if unit == "연도":
+            return df[dates.dt.year.astype(str) == value]
+        return df[dates.dt.strftime("%Y-%m") == value]
 
     def load_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1116,28 +1215,38 @@ class TextMiningApp(QMainWindow):
         self.refresh_token_sample()
 
     def show_token_menu(self, pos):
-        item = self.tbl_token_sample.itemAt(pos)
-        if item is None:
-            return
-        row = item.row()
-        token_item = self.tbl_token_sample.item(row, 0)
-        if token_item is None:
+        selection = self.tbl_token_sample.selectionModel().selectedRows()
+        if selection:
+            rows = [index.row() for index in selection]
+        else:
+            item = self.tbl_token_sample.itemAt(pos)
+            if item is None:
+                return
+            rows = [item.row()]
+        tokens = []
+        for row in rows:
+            token_item = self.tbl_token_sample.item(row, 0)
+            if token_item is not None:
+                tokens.append(token_item.text())
+        if not tokens:
             return
         menu = QMenu(self)
-        action_delete = menu.addAction("단어 삭제(불용어 추가)")
+        action_delete = menu.addAction("선택 단어 삭제(불용어 추가)")
         action = menu.exec_(self.tbl_token_sample.viewport().mapToGlobal(pos))
         if action == action_delete:
-            self.add_stopword_from_table(token_item.text())
+            self.add_stopwords_from_table(tokens)
 
-    def add_stopword_from_table(self, token: str):
-        token = token.strip()
-        if not token:
+    def add_stopwords_from_table(self, tokens: list[str]):
+        cleaned = [token.strip() for token in tokens if token and token.strip()]
+        if not cleaned:
             return
-        self.stopwords.add(token)
+        self.stopwords.update(cleaned)
         existing = set(re.split(r"[,\n]", self.txt_stopwords.toPlainText()))
-        if token not in existing:
+        additions = [token for token in cleaned if token not in existing]
+        if additions:
             current = self.txt_stopwords.toPlainText().strip()
-            updated = f"{current}\n{token}" if current else token
+            updated = f"{current}\n" if current else ""
+            updated += "\n".join(additions)
             self.txt_stopwords.setPlainText(updated)
         self.refresh_token_sample()
         if self.word_freq_df is not None:
@@ -1185,16 +1294,18 @@ class TextMiningApp(QMainWindow):
     def build_buzz(self):
         if self.df_clean is None:
             return
-        df = self.df_clean.copy()
+        df = self.filter_df_by_period(
+            self.df_clean.copy(), self.cb_buzz_period_unit, self.cb_buzz_period_value
+        )
+        if df.empty:
+            self.buzz_canvas.ax.clear()
+            self.buzz_canvas.draw()
+            self.tbl_buzz.setRowCount(0)
+            self.statusBar().showMessage("선택한 기간에 데이터가 없습니다.")
+            return
         gran = self.cb_granularity.currentText()
-        if gran == "일":
-            df["bucket"] = df["date"]
-        elif gran == "주":
-            df["bucket"] = df["date"].dt.to_period("W").dt.start_time
-        elif gran == "월":
+        if gran == "월":
             df["bucket"] = df["date"].dt.to_period("M").dt.start_time
-        elif gran == "분기":
-            df["bucket"] = df["date"].dt.to_period("Q").dt.start_time
         else:
             df["bucket"] = df["date"].dt.to_period("Y").dt.start_time
 
@@ -1246,15 +1357,20 @@ class TextMiningApp(QMainWindow):
         if self.df_clean is None:
             return
         topn = int(self.cb_wc_topn.currentText())
+        df = self.filter_df_by_period(
+            self.df_clean, self.cb_wc_period_unit, self.cb_wc_period_value
+        )
         tokens = list(itertools.chain.from_iterable(
-            self.tokenize_text(text) for text in self.df_clean["full_text"]
+            self.tokenize_text(text) for text in df["full_text"]
         ))
         series = pd.Series(tokens)
-        freq = series.value_counts().head(topn)
+        freq = series.value_counts()
         self.word_freq_df = freq.reset_index().rename(columns={"index": "token", 0: "count"})
+        self.lbl_wc_count.setText(f"토큰 {len(tokens)} / 고유 {len(freq)}")
 
         if freq.empty:
             self.lbl_wc_view.setText("데이터가 없습니다")
+            self.tbl_wc_topn.setRowCount(0)
             return
         font_path = self.font_path
         wordcloud = WordCloud(
@@ -1263,7 +1379,7 @@ class TextMiningApp(QMainWindow):
             background_color="white",
             font_path=str(font_path) if font_path else None,
         )
-        wc_img = wordcloud.generate_from_frequencies(freq.to_dict())
+        wc_img = wordcloud.generate_from_frequencies(freq.head(topn).to_dict())
         wc_path = os.path.join(os.getcwd(), "wordcloud.png")
         wc_img.to_file(wc_path)
         self.wc_image_path = wc_path
@@ -1272,8 +1388,9 @@ class TextMiningApp(QMainWindow):
         pixmap = QPixmap(wc_path)
         self.lbl_wc_view.setPixmap(pixmap.scaled(self.lbl_wc_view.size(), Qt.KeepAspectRatio))
 
-        self.tbl_wc_topn.setRowCount(len(freq))
-        for row_idx, (token, count) in enumerate(freq.items()):
+        top_freq = freq.head(topn)
+        self.tbl_wc_topn.setRowCount(len(top_freq))
+        for row_idx, (token, count) in enumerate(top_freq.items()):
             self.tbl_wc_topn.setItem(row_idx, 0, QTableWidgetItem(token))
             self.tbl_wc_topn.setItem(row_idx, 1, QTableWidgetItem(str(count)))
 
@@ -1295,6 +1412,17 @@ class TextMiningApp(QMainWindow):
     def build_network(self):
         if self.df_clean is None:
             return
+        df = self.filter_df_by_period(
+            self.df_clean, self.cb_network_period_unit, self.cb_network_period_value
+        )
+        if df.empty:
+            self.statusBar().showMessage("선택한 기간에 네트워크 데이터가 없습니다.")
+            self.graph_full = None
+            self.graph_view = None
+            self.network_pos = None
+            self.draw_network(nx.Graph())
+            self.populate_network_tables(pd.DataFrame(), pd.DataFrame())
+            return
         if self.cb_mode.currentText() == "기본":
             scope = "문서(로우)"
             weight_mode = "count"
@@ -1304,13 +1432,13 @@ class TextMiningApp(QMainWindow):
 
         token_lists = []
         if scope == "문서(로우)":
-            for text in self.df_clean["full_text"]:
+            for text in df["full_text"]:
                 tokens = [normalize_term(token) for token in self.tokenize_text(text)]
                 tokens = [token for token in tokens if token]
                 if tokens:
                     token_lists.append(tokens)
         else:
-            for text in self.df_clean["full_text"]:
+            for text in df["full_text"]:
                 for sentence in split_sentences(text):
                     tokens = [normalize_term(token) for token in self.tokenize_text(sentence)]
                     tokens = [token for token in tokens if token]
@@ -1322,11 +1450,31 @@ class TextMiningApp(QMainWindow):
             return
 
         node_counts = {}
-        edge_counts = {}
         for tokens in token_lists:
             unique_tokens = list(dict.fromkeys(tokens))
             for token in unique_tokens:
                 node_counts[token] = node_counts.get(token, 0) + 1
+
+        min_node = self.sb_min_node_count.value()
+        min_edge = self.sb_min_edge_weight.value()
+        max_nodes = self.sb_max_nodes.value()
+        filtered_nodes = {node for node, count in node_counts.items() if count >= min_node}
+        ranked_nodes = sorted(filtered_nodes, key=lambda n: node_counts[n], reverse=True)[:max_nodes]
+        ranked_nodes_set = set(ranked_nodes)
+        if not ranked_nodes_set:
+            self.statusBar().showMessage("필터 조건에 맞는 노드가 없습니다.")
+            self.graph_full = None
+            self.graph_view = None
+            self.network_pos = None
+            self.draw_network(nx.Graph())
+            self.populate_network_tables(pd.DataFrame(), pd.DataFrame())
+            return
+
+        edge_counts = {}
+        for tokens in token_lists:
+            unique_tokens = [token for token in dict.fromkeys(tokens) if token in ranked_nodes_set]
+            if len(unique_tokens) < 2:
+                continue
             for a, b in itertools.combinations(unique_tokens, 2):
                 edge = tuple(sorted((a, b)))
                 edge_counts[edge] = edge_counts.get(edge, 0) + 1
@@ -1342,22 +1490,8 @@ class TextMiningApp(QMainWindow):
         else:
             edge_weights = {edge: float(count) for edge, count in edge_counts.items()}
 
-        min_node = self.sb_min_node_count.value()
-        min_edge = self.sb_min_edge_weight.value()
-        max_nodes = self.sb_max_nodes.value()
-        filtered_nodes = {node for node, count in node_counts.items() if count >= min_node}
         filtered_edges = {
-            edge: weight
-            for edge, weight in edge_weights.items()
-            if edge[0] in filtered_nodes and edge[1] in filtered_nodes and weight >= min_edge
-        }
-
-        ranked_nodes = sorted(filtered_nodes, key=lambda n: node_counts[n], reverse=True)[:max_nodes]
-        ranked_nodes_set = set(ranked_nodes)
-        filtered_edges = {
-            edge: weight
-            for edge, weight in filtered_edges.items()
-            if edge[0] in ranked_nodes_set and edge[1] in ranked_nodes_set
+            edge: weight for edge, weight in edge_weights.items() if weight >= min_edge
         }
         self.update_network_recommendation(len(token_lists), len(node_counts))
 
@@ -1458,10 +1592,24 @@ class TextMiningApp(QMainWindow):
             self.network_canvas.draw()
             return
         if self.network_pos is None or set(self.network_pos.keys()) != set(graph.nodes):
-            self.network_pos = nx.spring_layout(graph, k=0.6, seed=42)
+            k = max(0.3, 2 / max(1, graph.number_of_nodes()) ** 0.5)
+            self.network_pos = nx.spring_layout(graph, k=k, seed=42)
         pos = self.network_pos
-        nx.draw_networkx_nodes(graph, pos, ax=self.network_canvas.ax, node_size=200, node_color="#6baed6")
-        nx.draw_networkx_edges(graph, pos, ax=self.network_canvas.ax, width=1.0, edge_color="#999999")
+        degrees = [graph.degree(node) for node in graph.nodes]
+        max_degree = max(degrees) if degrees else 1
+        sizes = [200 + 1200 * (deg / max_degree) for deg in degrees]
+        norm = colors.Normalize(vmin=0, vmax=max_degree or 1)
+        cmap = cm.get_cmap("Set2")
+        node_colors = [cmap(norm(deg)) for deg in degrees]
+        edge_weights = [data.get("weight", 1.0) for _, _, data in graph.edges(data=True)]
+        max_weight = max(edge_weights) if edge_weights else 1.0
+        edge_widths = [0.6 + 3.0 * (weight / max_weight) for weight in edge_weights]
+        nx.draw_networkx_nodes(
+            graph, pos, ax=self.network_canvas.ax, node_size=sizes, node_color=node_colors
+        )
+        nx.draw_networkx_edges(
+            graph, pos, ax=self.network_canvas.ax, width=edge_widths, edge_color="#999999", alpha=0.7
+        )
         label_kwargs = {"font_size": 8}
         if self.network_font_name:
             label_kwargs["font_family"] = self.network_font_name
@@ -1548,7 +1696,16 @@ class TextMiningApp(QMainWindow):
     def update_sentiment_view(self):
         if self.sentiment_records_df is None or self.sentiment_records_df.empty:
             return
-        df = self.sentiment_records_df.copy()
+        df = self.filter_df_by_period(
+            self.sentiment_records_df.copy(), self.cb_sent_period_unit, self.cb_sent_period_value
+        )
+        if df.empty:
+            self.tbl_sent_records.setRowCount(0)
+            self.sent_canvas.ax.clear()
+            self.sent_canvas.draw()
+            self.txt_voc.clear()
+            self.statusBar().showMessage("선택한 기간에 감성 데이터가 없습니다.")
+            return
         mode = self.cb_sent_mode.currentText()
         topic_filter = self.cb_brand_filter.currentText()
         self.cb_brand_filter.setEnabled(mode == "사전별 감성")
@@ -1558,10 +1715,8 @@ class TextMiningApp(QMainWindow):
         view = self.cb_sent_view.currentText()
         if view == "월별":
             df["bucket"] = df["date"].dt.strftime("%Y-%m")
-        elif view == "채널별":
-            df["bucket"] = df["page_type"].fillna("")
         else:
-            df["bucket"] = "전체"
+            df["bucket"] = df["date"].dt.strftime("%Y")
 
         score_order = [-2, -1, 0, 1, 2]
         summary = (
@@ -1702,7 +1857,7 @@ class TextMiningApp(QMainWindow):
         else:
             min_node = 10
             min_edge = 5
-        max_nodes = min(700, max(100, int(token_count * 0.6)))
+        max_nodes = min(200, max(30, int(token_count * 0.3)))
         self.lbl_network_reco.setText(
             f"데이터 {doc_count}건/토큰 {token_count}개 기준 권장: "
             f"노드 최소 {min_node}, 엣지 최소 {min_edge}, 최대 노드 {max_nodes}"
