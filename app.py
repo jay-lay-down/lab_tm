@@ -1,8 +1,10 @@
 import itertools
+import json
 import os
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -13,7 +15,7 @@ from kiwipiepy import Kiwi
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from openpyxl.drawing.image import Image as XLImage
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QFont, QFontDatabase, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -44,16 +46,50 @@ matplotlib.use("Qt5Agg")
 KNU_DICT_URL = "https://raw.githubusercontent.com/park1200656/KnuSentiLex/master/data/SentiWord_info.json"
 
 
+def resource_path(rel_path: str) -> str:
+    base = getattr(sys, "_MEIPASS", str(Path(__file__).resolve().parent))
+    return str(Path(base) / rel_path)
+
+
+def parse_sentiment_entries(entries):
+    senti_dict = {}
+    for entry in entries:
+        if isinstance(entry, dict):
+            root = entry.get("word_root", entry.get("word"))
+            score = int(entry.get("polarity", 0))
+            if root:
+                senti_dict[root] = score
+            continue
+        if isinstance(entry, str):
+            parts = re.split(r"[\t,]", entry.strip())
+            if len(parts) >= 2:
+                root = parts[0].strip()
+                if root:
+                    try:
+                        score = int(parts[1].strip())
+                    except ValueError:
+                        continue
+                    senti_dict[root] = score
+    return senti_dict
+
+
 def load_knu_dictionary():
+    local_path = resource_path("SentiWord_Dict.txt")
+    if os.path.exists(local_path):
+        with open(local_path, "r", encoding="utf-8") as file:
+            content = file.read()
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            data = content.splitlines()
+        senti_dict = parse_sentiment_entries(data)
+        if senti_dict:
+            return senti_dict
+
     response = requests.get(KNU_DICT_URL, timeout=10)
     response.raise_for_status()
     data = response.json()
-    senti_dict = {}
-    for entry in data:
-        root = entry.get("word_root", entry.get("word"))
-        score = int(entry.get("polarity", 0))
-        senti_dict[root] = score
-    return senti_dict
+    return parse_sentiment_entries(data)
 
 
 def split_sentences(text: str):
@@ -1103,6 +1139,15 @@ class TextMiningApp(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+
+    font_path = resource_path("Pretendard-Medium.otf")
+    if os.path.exists(font_path):
+        font_id = QFontDatabase.addApplicationFont(font_path)
+        if font_id != -1:
+            families = QFontDatabase.applicationFontFamilies(font_id)
+            if families:
+                app.setFont(QFont(families[0], 10))
+
     window = TextMiningApp()
     window.show()
     sys.exit(app.exec())
