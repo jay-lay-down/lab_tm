@@ -592,7 +592,7 @@ class TextMiningApp(QMainWindow):
         self.cb_mode.currentIndexChanged.connect(self.toggle_network_advanced)
         self.sb_min_node_count = QSpinBox()
         self.sb_min_node_count.setRange(1, 100)
-        self.sb_min_node_count.setValue(5)
+        self.sb_min_node_count.setValue(1)
         self.lbl_min_node = QLabel("노드 최소 등장")
         self.sb_min_edge_weight = QSpinBox()
         self.sb_min_edge_weight.setRange(1, 100)
@@ -1307,14 +1307,14 @@ class TextMiningApp(QMainWindow):
             for text in self.df_clean["full_text"]:
                 tokens = [normalize_term(token) for token in self.tokenize_text(text)]
                 tokens = [token for token in tokens if token]
-                if len(tokens) > 1:
+                if tokens:
                     token_lists.append(tokens)
         else:
             for text in self.df_clean["full_text"]:
                 for sentence in split_sentences(text):
                     tokens = [normalize_term(token) for token in self.tokenize_text(sentence)]
                     tokens = [token for token in tokens if token]
-                    if len(tokens) > 1:
+                    if tokens:
                         token_lists.append(tokens)
 
         if not token_lists:
