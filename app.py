@@ -496,7 +496,7 @@ class TextMiningApp(QMainWindow):
         top.setFixedHeight(80)
         top_layout = QGridLayout(top)
         self.cb_granularity = QComboBox()
-        self.cb_granularity.addItems(["연도", "월"])
+        self.cb_granularity.addItems(["연도", "월", "주", "일"])
         self.cb_buzz_period_unit = self.cb_granularity
         self.cb_buzz_period_value = QComboBox()
         self.cb_buzz_period_unit.currentIndexChanged.connect(
@@ -984,8 +984,12 @@ class TextMiningApp(QMainWindow):
         unit = unit_combo.currentText()
         if unit == "연도":
             values = sorted({str(val.year) for val in dates})
-        else:
+        elif unit == "월":
             values = sorted({val.strftime("%Y-%m") for val in dates})
+        elif unit == "주":
+            values = sorted({val.to_period("W").start_time.strftime("%Y-%m-%d") for val in dates})
+        else:
+            values = sorted({val.strftime("%Y-%m-%d") for val in dates})
         for value in values:
             value_combo.addItem(value)
         value_combo.blockSignals(False)
@@ -1069,7 +1073,22 @@ class TextMiningApp(QMainWindow):
         dates = df["date"]
         if unit == "연도":
             return df[dates.dt.year.astype(str) == value]
-        return df[dates.dt.strftime("%Y-%m") == value]
+        if unit == "월":
+            return df[dates.dt.strftime("%Y-%m") == value]
+        if unit == "주":
+            return df[dates.dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d") == value]
+        return df[dates.dt.strftime("%Y-%m-%d") == value]
+
+    def filter_sentiment_by_period(self, df: pd.DataFrame):
+        if df is None or df.empty or "date" not in df.columns:
+            return df
+        value = self.cb_sent_period_value.currentText()
+        if value in {PERIOD_ALL_LABEL, "전체"}:
+            return df
+        view = self.cb_sent_view.currentText()
+        if view == "월별":
+            return df[df["date"].dt.strftime("%Y-%m") == value]
+        return df[df["date"].dt.strftime("%Y") == value]
 
     def filter_sentiment_by_period(self, df: pd.DataFrame):
         if df is None or df.empty or "date" not in df.columns:
@@ -1579,6 +1598,10 @@ class TextMiningApp(QMainWindow):
         gran = self.cb_granularity.currentText()
         if gran == "월":
             df["bucket"] = df["date"].dt.to_period("M").dt.start_time
+        elif gran == "주":
+            df["bucket"] = df["date"].dt.to_period("W").dt.start_time
+        elif gran == "일":
+            df["bucket"] = df["date"].dt.normalize()
         else:
             df["bucket"] = df["date"].dt.to_period("Y").dt.start_time
 
