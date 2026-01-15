@@ -9,6 +9,7 @@ from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib import font_manager as fm
 import networkx as nx
 import pandas as pd
 import requests
@@ -1352,7 +1353,10 @@ def main():
                 families = QFontDatabase.applicationFontFamilies(font_id)
                 if families:
                     app.setFont(QFont(families[0], 10))
-                    break
+            fm.fontManager.addfont(str(font_path))
+            plt.rcParams["font.family"] = DEFAULT_FONT_NAME.replace(".otf", "")
+            plt.rcParams["axes.unicode_minus"] = False
+            break
 
     window = TextMiningApp()
     window.show()
