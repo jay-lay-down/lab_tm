@@ -51,6 +51,15 @@ KNU_DICT_URL = "https://raw.githubusercontent.com/park1200656/KnuSentiLex/master
 DEFAULT_RESOURCE_DIR = Path(r"C:\Users\70089004\text_file")
 DEFAULT_FONT_NAME = "Pretendard-Medium.otf"
 DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
+DEFAULT_NETWORK_FONT_NAME = "malgun.ttf"
+FALLBACK_FONT_NAMES = [
+    "Pretendard",
+    "Malgun Gothic",
+    "AppleGothic",
+    "NanumGothic",
+    "Noto Sans CJK KR",
+    "Noto Sans KR",
+]
 
 
 def resource_path(rel_path: str) -> str:
@@ -71,6 +80,40 @@ def first_existing_path(filename: str) -> Path | None:
         if path.exists():
             return path
     return None
+
+
+def resolve_font_path() -> str | None:
+    font_path = first_existing_path(DEFAULT_FONT_NAME)
+    if font_path:
+        return str(font_path)
+    for font in fm.fontManager.ttflist:
+        if font.name in FALLBACK_FONT_NAMES:
+            return font.fname
+    return None
+
+
+def resolve_network_font_path() -> str | None:
+    network_font_path = first_existing_path(DEFAULT_NETWORK_FONT_NAME)
+    if network_font_path:
+        return str(network_font_path)
+    return resolve_font_path()
+
+
+def resolve_font_name(font_path: str | None) -> str | None:
+    if not font_path:
+        return None
+    fm.fontManager.addfont(font_path)
+    return fm.FontProperties(fname=font_path).get_name()
+
+
+def configure_matplotlib_font(font_path: str | None):
+    if not font_path:
+        return
+    font_name = resolve_font_name(font_path)
+    if not font_name:
+        return
+    plt.rcParams["font.family"] = font_name
+    plt.rcParams["axes.unicode_minus"] = False
 
 
 def parse_sentiment_entries(entries):
@@ -274,6 +317,9 @@ class TextMiningApp(QMainWindow):
         self.senti_dict = None
         self.senti_max_n = 1
         self.kiwi = Kiwi()
+        self.font_path = resolve_font_path()
+        self.network_font_path = resolve_network_font_path()
+        self.network_font_name = resolve_font_name(self.network_font_path)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -425,11 +471,17 @@ class TextMiningApp(QMainWindow):
         self.txt_topic_related.setFixedHeight(90)
         self.btn_apply_brand = QPushButton("토픽 추가")
         self.btn_apply_brand.clicked.connect(self.apply_brand_dict)
+        self.btn_save_topics = QPushButton("토픽 저장")
+        self.btn_save_topics.clicked.connect(self.save_topic_dictionary)
+        self.btn_load_topics = QPushButton("토픽 불러오기")
+        self.btn_load_topics.clicked.connect(self.load_topic_dictionary)
         self.list_topics = QListWidget()
         self.list_topics.setMinimumHeight(120)
         topic_buttons = QHBoxLayout()
         self.btn_remove_topic = QPushButton("선택 토픽 삭제")
         self.btn_remove_topic.clicked.connect(self.remove_selected_topic)
+        topic_buttons.addWidget(self.btn_save_topics)
+        topic_buttons.addWidget(self.btn_load_topics)
         topic_buttons.addStretch()
         topic_buttons.addWidget(self.btn_remove_topic)
         topic_layout.addLayout(topic_row)
@@ -525,12 +577,15 @@ class TextMiningApp(QMainWindow):
         self.sb_min_node_count = QSpinBox()
         self.sb_min_node_count.setRange(1, 100)
         self.sb_min_node_count.setValue(5)
+        self.lbl_min_node = QLabel("노드 최소 등장")
         self.sb_min_edge_weight = QSpinBox()
         self.sb_min_edge_weight.setRange(1, 100)
         self.sb_min_edge_weight.setValue(3)
+        self.lbl_min_edge = QLabel("엣지 최소 가중치")
         self.sb_max_nodes = QSpinBox()
         self.sb_max_nodes.setRange(50, 1000)
         self.sb_max_nodes.setValue(300)
+        self.lbl_max_nodes = QLabel("최대 노드 수")
 
         self.le_node_search = QLineEdit()
         self.le_node_search.setPlaceholderText("노드 검색")
@@ -551,6 +606,7 @@ class TextMiningApp(QMainWindow):
         self.cb_weight_mode.currentIndexChanged.connect(self.handle_pmi_guard)
         self.chk_drag_mode = QCheckBox("노드 위치 편집")
         self.chk_drag_mode.toggled.connect(self.redraw_network)
+        self.lbl_network_reco = QLabel("데이터 기준 권장값: -")
         self.lbl_advanced_hint = QLabel(
             "PMI는 희귀 단어쌍을 과대평가할 수 있어 min_node_count ≥ 10, "
             "min_edge_weight ≥ 5를 권장합니다. (데이터가 작을수록 필터를 높이세요)"
@@ -558,9 +614,12 @@ class TextMiningApp(QMainWindow):
 
         top_layout.addWidget(self.btn_build_graph, 0, 0)
         top_layout.addWidget(self.cb_mode, 0, 1)
-        top_layout.addWidget(self.sb_min_node_count, 0, 2)
-        top_layout.addWidget(self.sb_min_edge_weight, 0, 3)
-        top_layout.addWidget(self.sb_max_nodes, 0, 4)
+        top_layout.addWidget(self.lbl_min_node, 0, 2)
+        top_layout.addWidget(self.sb_min_node_count, 0, 3)
+        top_layout.addWidget(self.lbl_min_edge, 0, 4)
+        top_layout.addWidget(self.sb_min_edge_weight, 0, 5)
+        top_layout.addWidget(self.lbl_max_nodes, 0, 6)
+        top_layout.addWidget(self.sb_max_nodes, 0, 7)
         top_layout.addWidget(self.le_node_search, 1, 0)
         top_layout.addWidget(self.btn_add_seed, 1, 1)
         top_layout.addWidget(self.cb_hop_depth, 1, 2)
@@ -569,7 +628,8 @@ class TextMiningApp(QMainWindow):
         top_layout.addWidget(self.cb_cooc_scope, 2, 0, 1, 2)
         top_layout.addWidget(self.cb_weight_mode, 2, 2, 1, 2)
         top_layout.addWidget(self.chk_drag_mode, 2, 4)
-        top_layout.addWidget(self.lbl_advanced_hint, 2, 5)
+        top_layout.addWidget(self.lbl_network_reco, 2, 5, 1, 3)
+        top_layout.addWidget(self.lbl_advanced_hint, 2, 8)
 
         splitter.addWidget(top)
 
@@ -887,6 +947,53 @@ class TextMiningApp(QMainWindow):
             self.brand_map.pop(topic)
         self.refresh_topic_list()
 
+    def save_topic_dictionary(self):
+        if not self.brand_map:
+            self.statusBar().showMessage("저장할 토픽이 없습니다.")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "토픽 사전 저장",
+            "",
+            "JSON Files (*.json);;Text Files (*.txt)",
+        )
+        if not file_path:
+            return
+        if file_path.endswith(".txt"):
+            lines = [f"{topic}:{', '.join(words)}" for topic, words in self.brand_map.items()]
+            payload = "\n".join(lines)
+        else:
+            payload = json.dumps(self.brand_map, ensure_ascii=False, indent=2)
+        with open(file_path, "w", encoding="utf-8") as file:
+            file.write(payload)
+        self.statusBar().showMessage(f"토픽 사전 저장 완료: {file_path}")
+
+    def load_topic_dictionary(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "토픽 사전 불러오기",
+            "",
+            "JSON Files (*.json);;Text Files (*.txt);;All Files (*)",
+        )
+        if not file_path:
+            return
+        with open(file_path, "r", encoding="utf-8") as file:
+            content = file.read()
+        loaded = {}
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict):
+                loaded = {str(k): list(v) for k, v in data.items()}
+        except json.JSONDecodeError:
+            loaded = parse_brand_dictionary(content)
+        if not loaded:
+            self.statusBar().showMessage("토픽 사전을 불러오지 못했습니다.")
+            return
+        for topic, keywords in loaded.items():
+            self.brand_map[topic] = [kw for kw in keywords if kw]
+        self.refresh_topic_list()
+        self.statusBar().showMessage(f"토픽 사전 불러오기 완료: {len(loaded)}개")
+
     def split_sentiment_sentences(self, text: str):
         if not isinstance(text, str):
             return []
@@ -946,11 +1053,11 @@ class TextMiningApp(QMainWindow):
     def bin_sentiment_score(self, raw_score: float) -> int:
         if raw_score <= -2:
             return -2
-        if raw_score <= -0.5:
+        if raw_score == -1:
             return -1
-        if raw_score < 0.5:
+        if raw_score == 0:
             return 0
-        if raw_score < 2:
+        if raw_score == 1:
             return 1
         return 2
 
@@ -962,6 +1069,15 @@ class TextMiningApp(QMainWindow):
             1: "좋음",
             2: "가장 좋음",
         }.get(score, "중립")
+
+    def sentiment_bucket_label(self, score: int) -> str:
+        return {
+            -2: "부정 -2",
+            -1: "부정 -1",
+            0: "중립 0",
+            1: "긍정 +1",
+            2: "긍정 +2",
+        }.get(score, str(score))
 
     def match_topic(self, text: str) -> str:
         if not self.brand_map or not isinstance(text, str):
@@ -1128,7 +1244,7 @@ class TextMiningApp(QMainWindow):
         if freq.empty:
             self.lbl_wc_view.setText("데이터가 없습니다")
             return
-        font_path = first_existing_path(DEFAULT_FONT_NAME)
+        font_path = self.font_path
         wordcloud = WordCloud(
             width=800,
             height=500,
@@ -1229,6 +1345,7 @@ class TextMiningApp(QMainWindow):
             for edge, weight in filtered_edges.items()
             if edge[0] in ranked_nodes_set and edge[1] in ranked_nodes_set
         }
+        self.update_network_recommendation(len(token_lists), len(node_counts))
 
         graph = nx.Graph()
         for node in ranked_nodes:
@@ -1320,7 +1437,10 @@ class TextMiningApp(QMainWindow):
         pos = self.network_pos
         nx.draw_networkx_nodes(graph, pos, ax=self.network_canvas.ax, node_size=200, node_color="#6baed6")
         nx.draw_networkx_edges(graph, pos, ax=self.network_canvas.ax, width=1.0, edge_color="#999999")
-        nx.draw_networkx_labels(graph, pos, ax=self.network_canvas.ax, font_size=8)
+        label_kwargs = {"font_size": 8}
+        if self.network_font_name:
+            label_kwargs["font_family"] = self.network_font_name
+        nx.draw_networkx_labels(graph, pos, ax=self.network_canvas.ax, **label_kwargs)
         self.network_canvas.ax.set_title("네트워크")
         self.network_canvas.ax.axis("off")
         self.network_canvas.draw()
@@ -1381,7 +1501,7 @@ class TextMiningApp(QMainWindow):
                 tokens = self.tokenize_text(sentence)
                 matched = self.match_sentiment_tokens(tokens)
                 scores = [self.senti_dict.get(token, 0) for token in matched if token]
-                raw_score = sum(scores) / len(scores) if scores else 0
+                raw_score = sum(scores) if scores else 0
                 score = self.bin_sentiment_score(raw_score)
                 label = self.sentiment_score_label(score)
                 topic = self.match_topic(sentence)
@@ -1418,6 +1538,7 @@ class TextMiningApp(QMainWindow):
         else:
             df["bucket"] = "전체"
 
+        score_order = [-2, -1, 0, 1, 2]
         summary = (
             df.groupby(["bucket", "score", "label", "topic"])
             .size()
@@ -1426,16 +1547,18 @@ class TextMiningApp(QMainWindow):
         self.sentiment_summary_df = summary
 
         if mode == "사전별 감성":
-            grouped = df.groupby(["topic", "page_type"])
-            summary_df = grouped["score"].agg(["count", "mean"]).reset_index()
-            summary_df["pos_pct"] = grouped.apply(
-                lambda sub: (sub["score"] > 0).mean() * 100
-            ).values
-            summary_df["neg_pct"] = grouped.apply(
-                lambda sub: (sub["score"] < 0).mean() * 100
-            ).values
-            summary_df = summary_df.rename(columns={"mean": "avg_score"})
-            self.populate_sentiment_summary_table(summary_df)
+            bucket_summary = (
+                df.groupby(["bucket", "topic", "score"])
+                .size()
+                .reset_index(name="count")
+            )
+            pivot = bucket_summary.pivot_table(
+                index=["bucket", "topic"], columns="score", values="count", fill_value=0
+            ).reindex(columns=score_order, fill_value=0)
+            pivot["total"] = pivot.sum(axis=1)
+            pivot = pivot.reset_index()
+            pivot = pivot.rename(columns={score: self.sentiment_bucket_label(score) for score in score_order})
+            self.populate_sentiment_bucket_table(pivot)
             chart_summary = df.groupby(["score", "topic"]).size().reset_index(name="count")
         else:
             self.populate_sentiment_table(df)
@@ -1483,6 +1606,18 @@ class TextMiningApp(QMainWindow):
             self.tbl_sent_records.setItem(row_idx, 4, QTableWidgetItem(f"{row['neg_pct']:.2f}"))
             self.tbl_sent_records.setItem(row_idx, 5, QTableWidgetItem(str(int(row["count"]))))
 
+    def populate_sentiment_bucket_table(self, summary_df):
+        headers = list(summary_df.columns)
+        self.tbl_sent_records.setRowCount(len(summary_df))
+        self.tbl_sent_records.setColumnCount(len(headers))
+        self.tbl_sent_records.setHorizontalHeaderLabels(headers)
+        for row_idx, (_, row) in enumerate(summary_df.iterrows()):
+            for col_idx, col in enumerate(headers):
+                value = row[col]
+                if isinstance(value, float):
+                    value = f"{value:.2f}"
+                self.tbl_sent_records.setItem(row_idx, col_idx, QTableWidgetItem(str(value)))
+
     def update_voc_summary(self, df):
         if df.empty:
             self.txt_voc.clear()
@@ -1506,7 +1641,7 @@ class TextMiningApp(QMainWindow):
     def plot_sentiment_chart(self, summary):
         metric = self.cb_sent_metric.currentText()
         score_order = [-2, -1, 0, 1, 2]
-        labels = [str(score) for score in score_order]
+        labels = [self.sentiment_bucket_label(score) for score in score_order]
         if "topic" in summary.columns:
             pivot = summary.pivot_table(
                 index="score", columns="topic", values="count", fill_value=0
@@ -1532,6 +1667,22 @@ class TextMiningApp(QMainWindow):
             self.sent_canvas.plot_bar(labels, values, "감성 분포", ylabel)
         self.chart_images["sentiment"] = self.save_chart(self.sent_canvas, "sentiment")
 
+    def update_network_recommendation(self, doc_count: int, token_count: int):
+        if doc_count <= 100:
+            min_node = 2
+            min_edge = 2
+        elif doc_count <= 500:
+            min_node = 5
+            min_edge = 3
+        else:
+            min_node = 10
+            min_edge = 5
+        max_nodes = min(700, max(100, int(token_count * 0.6)))
+        self.lbl_network_reco.setText(
+            f"데이터 {doc_count}건/토큰 {token_count}개 기준 권장: "
+            f"노드 최소 {min_node}, 엣지 최소 {min_edge}, 최대 노드 {max_nodes}"
+        )
+
     def choose_output_dir(self):
         folder = QFileDialog.getExistingDirectory(self, "저장 폴더 선택")
         if folder:
@@ -1552,7 +1703,10 @@ class TextMiningApp(QMainWindow):
             if self.list_export_items.item(i).checkState() == Qt.Checked
         }
 
-        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        writer_kwargs = {"engine": "openpyxl"}
+        if os.path.exists(path):
+            writer_kwargs.update({"mode": "a", "if_sheet_exists": "replace"})
+        with pd.ExcelWriter(path, **writer_kwargs) as writer:
             if "clean_data" in items and self.df_clean is not None:
                 self.df_clean.to_excel(writer, sheet_name="clean_data", index=False)
             if "buzz_summary" in items and self.buzz_df is not None:
@@ -1603,17 +1757,14 @@ class TextMiningApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
 
-    font_path = first_existing_path(DEFAULT_FONT_NAME)
+    font_path = resolve_font_path()
     if font_path:
         font_id = QFontDatabase.addApplicationFont(str(font_path))
         if font_id != -1:
             families = QFontDatabase.applicationFontFamilies(font_id)
             if families:
                 app.setFont(QFont(families[0], 10))
-        fm.fontManager.addfont(str(font_path))
-        font_name = fm.FontProperties(fname=str(font_path)).get_name()
-        plt.rcParams["font.family"] = font_name
-        plt.rcParams["axes.unicode_minus"] = False
+    configure_matplotlib_font(font_path)
 
     window = TextMiningApp()
     window.show()
