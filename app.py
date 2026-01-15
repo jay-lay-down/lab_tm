@@ -4,6 +4,7 @@ import os
 import random
 import re
 import sys
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import List
@@ -29,6 +30,7 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -37,6 +39,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QMenu,
     QPushButton,
+    QRadioButton,
     QSplitter,
     QSpinBox,
     QScrollArea,
@@ -77,6 +80,37 @@ PROFANITY_PATTERN = re.compile(r"(ㅅㅂ|시발|씨발|ㅆㅂ|존나|ㅈㄴ|개)
 POSITIVE_PATTERN = re.compile(r"(좋다|좋아|최고|추천|만족|굿|대박|good|굿)")
 NEGATION_TOKENS = {"안", "못", "별로", "전혀", "아니", "없", "않"}
 CONTRAST_TOKENS = ["하지만", "근데", "그런데", "그러나"]
+CONTRACTIONS_MAP = {
+    "can't": "cannot",
+    "won't": "will not",
+    "don't": "do not",
+    "doesn't": "does not",
+    "didn't": "did not",
+    "i'm": "i am",
+    "you're": "you are",
+    "they're": "they are",
+    "we're": "we are",
+    "it's": "it is",
+    "that's": "that is",
+}
+DASH_TRANSLATION = str.maketrans(
+    {
+        "–": "-",
+        "—": "-",
+        "―": "-",
+        "‐": "-",
+    }
+)
+QUOTE_TRANSLATION = str.maketrans(
+    {
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "«": '"',
+        "»": '"',
+    }
+)
 
 
 def resource_path(rel_path: str) -> str:
@@ -395,6 +429,15 @@ class TextMiningApp(QMainWindow):
         self.chart_images = {}
         self.monthly_sampling_enabled = False
         self.monthly_sampling_checkboxes = []
+        self.manual_token_replacements = {}
+        self.manual_token_merges = []
+        self.manual_token_exclusions = set()
+        self.preprocess_tables = {}
+        self.preprocess_stopwords = set()
+        self.preprocess_length_filter = 0
+        self.last_wc_topn = []
+        self.last_wc_topn_value = 0
+        self.last_nodes_ranked = []
 
         self.senti_dict = None
         self.senti_max_n = 1
@@ -413,6 +456,7 @@ class TextMiningApp(QMainWindow):
         self._build_tab_data_load()
         self._build_tab_buzz()
         self._build_tab_text_mining()
+        self._build_tab_preprocess()
         self._build_tab_wordcloud()
         self._build_tab_network()
         self._build_tab_sentiment()
@@ -426,6 +470,20 @@ class TextMiningApp(QMainWindow):
         layout.addWidget(self.footer_label)
 
         self.update_gate_state()
+        self.apply_primary_button_styles()
+
+    def apply_primary_button_styles(self):
+        style = "QPushButton { background-color: #1e88e5; color: white; }"
+        for button in [
+            self.btn_apply_clean,
+            self.btn_refresh_buzz,
+            self.btn_build_wc,
+            self.btn_build_graph,
+            self.btn_run_sentiment,
+            self.btn_apply_preprocess,
+        ]:
+            if button:
+                button.setStyleSheet(style)
 
     def _build_tab_data_load(self):
         tab = QWidget()
@@ -526,15 +584,33 @@ class TextMiningApp(QMainWindow):
         layout.addWidget(top)
 
         splitter = QSplitter(Qt.Horizontal)
-        splitter.setSizes([750, 450])
+        splitter.setSizes([650, 350, 350])
         self.buzz_canvas = ChartCanvas()
+        self.buzz_canvas.mpl_connect("button_press_event", self.on_buzz_click)
         self.tbl_buzz = QTableWidget()
         self.tbl_buzz.setColumnCount(3)
         self.tbl_buzz.setHorizontalHeaderLabels(["date", "metric", "value"])
         self.tbl_buzz.horizontalHeader().setStretchLastSection(True)
+        self.buzz_detail_panel = QGroupBox("버즈 상승 탐색")
+        buzz_detail_layout = QVBoxLayout(self.buzz_detail_panel)
+        self.lbl_buzz_filters = QLabel("기간/채널: -")
+        self.txt_buzz_hot = QTextEdit()
+        self.txt_buzz_hot.setReadOnly(True)
+        self.txt_buzz_top = QTextEdit()
+        self.txt_buzz_top.setReadOnly(True)
+        self.txt_buzz_voc = QTextEdit()
+        self.txt_buzz_voc.setReadOnly(True)
+        buzz_detail_layout.addWidget(self.lbl_buzz_filters)
+        buzz_detail_layout.addWidget(QLabel("급상승 단어(핫토픽)"))
+        buzz_detail_layout.addWidget(self.txt_buzz_hot)
+        buzz_detail_layout.addWidget(QLabel("탑 토픽"))
+        buzz_detail_layout.addWidget(self.txt_buzz_top)
+        buzz_detail_layout.addWidget(QLabel("VOC 예시"))
+        buzz_detail_layout.addWidget(self.txt_buzz_voc)
 
         splitter.addWidget(self.buzz_canvas)
         splitter.addWidget(self.tbl_buzz)
+        splitter.addWidget(self.buzz_detail_panel)
         layout.addWidget(splitter)
 
         self.tabs.addTab(tab, "버즈량 분석")
@@ -623,6 +699,151 @@ class TextMiningApp(QMainWindow):
 
         self.tabs.addTab(tab, "텍스트마이닝 설정")
 
+    def _create_rule_table(self, headers, rows=6):
+        table = QTableWidget()
+        table.setColumnCount(len(headers))
+        table.setRowCount(rows)
+        table.setHorizontalHeaderLabels(headers)
+        table.horizontalHeader().setStretchLastSection(True)
+        return table
+
+    def _build_tab_preprocess(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setSizes([720, 680])
+        layout.addWidget(splitter)
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+
+        pre_group = QGroupBox("토큰화 전 규칙")
+        pre_layout = QGridLayout(pre_group)
+        self.cb_unicode_norm = QComboBox()
+        self.cb_unicode_norm.addItems(["사용 안 함", "NFKC", "NFC"])
+        self.chk_trim_space = QCheckBox("공백 정리")
+        self.chk_unify_quotes = QCheckBox("따옴표/대시 통일")
+        self.chk_model_punct = QCheckBox("모델명 구두점 통일 (S-24→S24)")
+        self.chk_repeat_reduce = QCheckBox("반복 문자 축약")
+        self.chk_lowercase = QCheckBox("영어 소문자화")
+        self.cb_contractions = QComboBox()
+        self.cb_contractions.addItems(["contractions 미적용", "contractions 적용"])
+
+        self.tbl_join_map = self._create_rule_table(["원문", "치환"], rows=6)
+        self.tbl_ko_en_map = self._create_rule_table(["표기", "대표"], rows=6)
+        self.tbl_compound_map = self._create_rule_table(["표기", "대표"], rows=6)
+
+        pre_layout.addWidget(QLabel("유니코드 정규화"), 0, 0)
+        pre_layout.addWidget(self.cb_unicode_norm, 0, 1)
+        pre_layout.addWidget(self.chk_trim_space, 0, 2)
+        pre_layout.addWidget(self.chk_unify_quotes, 0, 3)
+        pre_layout.addWidget(self.chk_model_punct, 1, 0, 1, 2)
+        pre_layout.addWidget(self.chk_repeat_reduce, 1, 2)
+        pre_layout.addWidget(self.chk_lowercase, 1, 3)
+        pre_layout.addWidget(QLabel("contractions"), 2, 0)
+        pre_layout.addWidget(self.cb_contractions, 2, 1)
+        pre_layout.addWidget(QLabel("붙여쓰기 치환"), 3, 0, 1, 2)
+        pre_layout.addWidget(self.tbl_join_map, 4, 0, 1, 4)
+        pre_layout.addWidget(QLabel("한글/영문 표기 통일"), 5, 0, 1, 2)
+        pre_layout.addWidget(self.tbl_ko_en_map, 6, 0, 1, 4)
+        pre_layout.addWidget(QLabel("복합어 통일"), 7, 0, 1, 2)
+        pre_layout.addWidget(self.tbl_compound_map, 8, 0, 1, 4)
+
+        post_group = QGroupBox("토큰화 후 규칙")
+        post_layout = QGridLayout(post_group)
+        self.tbl_repr_map = self._create_rule_table(["표현", "대표어"], rows=6)
+        self.chk_lemmatize = QCheckBox("원형화/표제어 처리")
+        self.txt_pre_stopwords = QTextEdit()
+        self.txt_pre_stopwords.setPlaceholderText("불용어 입력 (쉼표/줄바꿈)")
+        self.sb_min_length = QSpinBox()
+        self.sb_min_length.setRange(0, 5)
+        self.sb_min_length.setValue(0)
+        self.tbl_merge_tokens = self._create_rule_table(["연속 토큰", "병합"], rows=6)
+        self.tbl_syn_map = self._create_rule_table(["동의어", "대표"], rows=6)
+        self.chk_plural_singular = QCheckBox("복수/단수 통합")
+        self.tbl_model_map = self._create_rule_table(["모델명", "대표"], rows=6)
+
+        post_layout.addWidget(QLabel("대표어 매핑"), 0, 0, 1, 2)
+        post_layout.addWidget(self.tbl_repr_map, 1, 0, 1, 4)
+        post_layout.addWidget(self.chk_lemmatize, 2, 0)
+        post_layout.addWidget(QLabel("불용어 제거"), 3, 0)
+        post_layout.addWidget(self.txt_pre_stopwords, 3, 1, 1, 3)
+        post_layout.addWidget(QLabel("길이 필터(글자 이하 제거)"), 4, 0)
+        post_layout.addWidget(self.sb_min_length, 4, 1)
+        post_layout.addWidget(QLabel("연속 토큰 병합"), 5, 0, 1, 2)
+        post_layout.addWidget(self.tbl_merge_tokens, 6, 0, 1, 4)
+        post_layout.addWidget(QLabel("다국어 동의어 통합"), 7, 0, 1, 2)
+        post_layout.addWidget(self.tbl_syn_map, 8, 0, 1, 4)
+        post_layout.addWidget(self.chk_plural_singular, 9, 0, 1, 2)
+        post_layout.addWidget(QLabel("모델명 표기 통일"), 10, 0, 1, 2)
+        post_layout.addWidget(self.tbl_model_map, 11, 0, 1, 4)
+
+        pos_group = QGroupBox("품사 선택")
+        pos_layout = QHBoxLayout(pos_group)
+        self.rb_pos_noun = QRadioButton("명사만")
+        self.rb_pos_noun_adj = QRadioButton("명사+형용사")
+        self.rb_pos_noun_verb = QRadioButton("명사+동사")
+        self.rb_pos_all = QRadioButton("명사+형용사+동사")
+        self.rb_pos_noun.setChecked(True)
+        pos_layout.addWidget(self.rb_pos_noun)
+        pos_layout.addWidget(self.rb_pos_noun_adj)
+        pos_layout.addWidget(self.rb_pos_noun_verb)
+        pos_layout.addWidget(self.rb_pos_all)
+
+        left_layout.addWidget(pre_group)
+        left_layout.addWidget(post_group)
+        left_layout.addWidget(pos_group)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        self.lbl_preprocess_count = QLabel("토큰 0 / 고유 0")
+        self.tbl_preprocess_tokens = QTableWidget()
+        self.tbl_preprocess_tokens.setColumnCount(2)
+        self.tbl_preprocess_tokens.setHorizontalHeaderLabels(["token", "count"])
+        self.tbl_preprocess_tokens.horizontalHeader().setStretchLastSection(True)
+        self.tbl_preprocess_tokens.setSelectionBehavior(QTableWidget.SelectRows)
+        self.tbl_preprocess_tokens.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.tbl_preprocess_tokens.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl_preprocess_tokens.customContextMenuRequested.connect(
+            self.show_preprocess_token_menu
+        )
+        self.btn_save_preprocess_tokens = QPushButton("Save")
+        self.btn_save_preprocess_tokens.setMaximumWidth(80)
+        self.btn_save_preprocess_tokens.clicked.connect(self.save_preprocess_token_edits)
+
+        right_layout.addWidget(self.lbl_preprocess_count)
+        right_layout.addWidget(self.tbl_preprocess_tokens)
+        right_layout.addWidget(self.btn_save_preprocess_tokens, alignment=Qt.AlignRight)
+
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+
+        buttons = QHBoxLayout()
+        self.btn_apply_preprocess = QPushButton("적용")
+        self.btn_apply_preprocess.clicked.connect(self.apply_preprocess_rules)
+        self.btn_reset_preprocess = QPushButton("초기화")
+        self.btn_reset_preprocess.clicked.connect(self.reset_preprocess_rules)
+        self.btn_save_preprocess_rules = QPushButton("저장")
+        self.btn_save_preprocess_rules.clicked.connect(self.save_preprocess_rules)
+        buttons.addStretch()
+        buttons.addWidget(self.btn_apply_preprocess)
+        buttons.addWidget(self.btn_reset_preprocess)
+        buttons.addWidget(self.btn_save_preprocess_rules)
+        layout.addLayout(buttons)
+
+        self.preprocess_tables = {
+            "join": self.tbl_join_map,
+            "ko_en": self.tbl_ko_en_map,
+            "compound": self.tbl_compound_map,
+            "repr": self.tbl_repr_map,
+            "merge": self.tbl_merge_tokens,
+            "syn": self.tbl_syn_map,
+            "model": self.tbl_model_map,
+        }
+
+        self.tabs.addTab(tab, "전처리")
+
     def _build_tab_wordcloud(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -643,7 +864,7 @@ class TextMiningApp(QMainWindow):
         )
         self.cb_wc_period_value.currentIndexChanged.connect(self.refresh_token_sample)
         self.cb_wc_topn = QComboBox()
-        self.cb_wc_topn.addItems(["30", "50", "100", "200", "500", "1000", "2000"])
+        self.cb_wc_topn.addItems(["30", "50", "100", "200"])
         self.cb_wc_topn.currentIndexChanged.connect(self.refresh_token_sample)
         self.btn_build_wc = QPushButton("워드클라우드 생성")
         self.btn_build_wc.clicked.connect(self.build_wordcloud)
@@ -671,9 +892,20 @@ class TextMiningApp(QMainWindow):
         self.tbl_wc_topn.setColumnCount(2)
         self.tbl_wc_topn.setHorizontalHeaderLabels(["token", "count"])
         self.tbl_wc_topn.horizontalHeader().setStretchLastSection(True)
+        self.tbl_wc_topn.setSelectionBehavior(QTableWidget.SelectRows)
+        self.tbl_wc_topn.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.tbl_wc_topn.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl_wc_topn.customContextMenuRequested.connect(self.show_wordcloud_menu)
+        self.btn_save_wc_table = QPushButton("Save")
+        self.btn_save_wc_table.setMaximumWidth(80)
+        self.btn_save_wc_table.clicked.connect(self.save_wordcloud_edits)
 
         splitter.addWidget(self.lbl_wc_view)
-        splitter.addWidget(self.tbl_wc_topn)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.addWidget(self.tbl_wc_topn)
+        right_layout.addWidget(self.btn_save_wc_table, alignment=Qt.AlignRight)
+        splitter.addWidget(right)
         layout.addWidget(splitter)
 
         self.tabs.addTab(tab, "워드클라우드")
@@ -689,7 +921,7 @@ class TextMiningApp(QMainWindow):
         top = QWidget()
         top.setFixedHeight(150)
         top_layout = QGridLayout(top)
-        self.btn_build_graph = QPushButton("그래프 생성(전체)")
+        self.btn_build_graph = QPushButton("그래프 생성")
         self.btn_build_graph.clicked.connect(self.build_network)
         self.cb_network_period_unit = QComboBox()
         self.cb_network_period_unit.addItems(["연도", "월"])
@@ -747,19 +979,19 @@ class TextMiningApp(QMainWindow):
         top_layout.addWidget(self.cb_network_period_unit, 0, 1)
         top_layout.addWidget(QLabel("기간 선택"), 0, 2)
         top_layout.addWidget(self.cb_network_period_value, 0, 3)
-        top_layout.addWidget(self.btn_build_graph, 0, 4)
-        top_layout.addWidget(self.cb_mode, 0, 5)
-        top_layout.addWidget(self.lbl_min_node, 0, 6)
-        top_layout.addWidget(self.sb_min_node_count, 0, 7)
-        top_layout.addWidget(self.lbl_min_edge, 0, 8)
-        top_layout.addWidget(self.sb_min_edge_weight, 0, 9)
-        top_layout.addWidget(self.lbl_max_nodes, 0, 10)
-        top_layout.addWidget(self.sb_max_nodes, 0, 11)
+        top_layout.addWidget(self.cb_mode, 0, 4)
+        top_layout.addWidget(self.lbl_min_node, 0, 5)
+        top_layout.addWidget(self.sb_min_node_count, 0, 6)
+        top_layout.addWidget(self.lbl_min_edge, 0, 7)
+        top_layout.addWidget(self.sb_min_edge_weight, 0, 8)
+        top_layout.addWidget(self.lbl_max_nodes, 0, 9)
+        top_layout.addWidget(self.sb_max_nodes, 0, 10)
         top_layout.addWidget(self.le_node_search, 1, 0, 1, 2)
         top_layout.addWidget(self.btn_add_seed, 1, 2)
         top_layout.addWidget(self.cb_hop_depth, 1, 3)
         top_layout.addWidget(self.btn_apply_hop, 1, 4)
         top_layout.addWidget(self.btn_reset_view, 1, 5)
+        top_layout.addWidget(self.btn_build_graph, 1, 6)
         top_layout.addWidget(self.cb_cooc_scope, 2, 0, 1, 2)
         top_layout.addWidget(self.cb_weight_mode, 2, 2, 1, 2)
         top_layout.addWidget(self.chk_drag_mode, 2, 4)
@@ -792,8 +1024,15 @@ class TextMiningApp(QMainWindow):
         self.tbl_nodes.horizontalHeader().setStretchLastSection(True)
         self.network_tabs.addTab(self.tbl_edges, "Edges")
         self.network_tabs.addTab(self.tbl_nodes, "Nodes")
+        self.btn_save_network_table = QPushButton("Save")
+        self.btn_save_network_table.setMaximumWidth(80)
+        self.btn_save_network_table.clicked.connect(self.save_network_edits)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.addWidget(self.network_tabs)
+        right_layout.addWidget(self.btn_save_network_table, alignment=Qt.AlignRight)
         bottom.addWidget(self.network_canvas)
-        bottom.addWidget(self.network_tabs)
+        bottom.addWidget(right)
         splitter.addWidget(bottom)
 
         self.tabs.addTab(tab, "네트워크")
@@ -814,7 +1053,7 @@ class TextMiningApp(QMainWindow):
         self.cb_sent_mode.addItems(["전체 감성", "사전별 감성"])
         self.cb_sent_mode.currentIndexChanged.connect(self.update_sentiment_view)
         self.cb_sent_view = QComboBox()
-        self.cb_sent_view.addItems(["연도별", "월별"])
+        self.cb_sent_view.addItems(["연도별", "월별", "주별", "일별"])
         self.cb_sent_view.currentIndexChanged.connect(
             lambda: (self.populate_sentiment_period_values(), self.update_sentiment_view())
         )
@@ -829,6 +1068,7 @@ class TextMiningApp(QMainWindow):
         self.btn_run_sentiment = QPushButton("감성분석 실행")
         self.btn_run_sentiment.clicked.connect(self.run_sentiment)
         self.chk_monthly_sample_sent = self.create_monthly_sampling_checkbox()
+        self.lbl_sent_period_range = QLabel("")
 
         filter_layout.addWidget(QLabel("기간 선택"), 0, 0)
         filter_layout.addWidget(self.cb_sent_period_value, 0, 1)
@@ -844,6 +1084,7 @@ class TextMiningApp(QMainWindow):
         filter_layout.addWidget(self.btn_run_sentiment, 1, 2)
         filter_layout.addWidget(QLabel("토픽"), 1, 3)
         filter_layout.addWidget(self.cb_brand_filter, 1, 4, 1, 2)
+        filter_layout.addWidget(self.lbl_sent_period_range, 1, 6, 1, 3)
         top_layout.addWidget(filter_row)
 
         rules_group = QGroupBox("룰 기반 보정")
@@ -889,6 +1130,10 @@ class TextMiningApp(QMainWindow):
             "topic",
         ])
         self.tbl_sent_records.horizontalHeader().setStretchLastSection(True)
+        self.tbl_sent_records.setSelectionBehavior(QTableWidget.SelectRows)
+        self.tbl_sent_records.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.tbl_sent_records.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl_sent_records.customContextMenuRequested.connect(self.show_sentiment_menu)
         self.sent_chart_tabs = QTabWidget()
         self.sent_canvas = ChartCanvas()
         self.sent_topic_charts_container = QWidget()
@@ -898,12 +1143,21 @@ class TextMiningApp(QMainWindow):
         self.sent_topic_scroll = QScrollArea()
         self.sent_topic_scroll.setWidgetResizable(True)
         self.sent_topic_scroll.setWidget(self.sent_topic_charts_container)
+        self.sent_topic_canvas = ChartCanvas()
+        self.sent_topic_charts_layout.addWidget(self.sent_topic_canvas)
         self.sent_trend_canvas = ChartCanvas()
         self.sent_chart_tabs.addTab(self.sent_canvas, "감성 분포")
         self.sent_chart_tabs.addTab(self.sent_topic_scroll, "사전별 감성 스택")
         self.sent_chart_tabs.addTab(self.sent_trend_canvas, "감성 추이")
         splitter.addWidget(self.tbl_sent_records)
-        splitter.addWidget(self.sent_chart_tabs)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.addWidget(self.sent_chart_tabs)
+        self.btn_save_sentiment_table = QPushButton("Save")
+        self.btn_save_sentiment_table.setMaximumWidth(80)
+        self.btn_save_sentiment_table.clicked.connect(self.save_sentiment_edits)
+        right_layout.addWidget(self.btn_save_sentiment_table, alignment=Qt.AlignRight)
+        splitter.addWidget(right)
 
         voc_group = QGroupBox("VoC 요약")
         voc_layout = QVBoxLayout(voc_group)
@@ -964,7 +1218,7 @@ class TextMiningApp(QMainWindow):
 
     def update_gate_state(self):
         enabled = self.df_clean is not None
-        for idx in range(1, 7):
+        for idx in range(1, 8):
             self.tabs.setTabEnabled(idx, enabled)
         if not enabled:
             self.statusBar().showMessage("데이터 로드 후 전처리를 적용해주세요.")
@@ -1019,6 +1273,10 @@ class TextMiningApp(QMainWindow):
         view = self.cb_sent_view.currentText()
         if view == "월별":
             values = sorted({val.strftime("%Y-%m") for val in dates})
+        elif view == "주별":
+            values = sorted({val.to_period("W").start_time.strftime("%Y-%m-%d") for val in dates})
+        elif view == "일별":
+            values = sorted({val.strftime("%Y-%m-%d") for val in dates})
         else:
             values = sorted({str(val.year) for val in dates})
         for value in values:
@@ -1088,17 +1346,10 @@ class TextMiningApp(QMainWindow):
         view = self.cb_sent_view.currentText()
         if view == "월별":
             return df[df["date"].dt.strftime("%Y-%m") == value]
-        return df[df["date"].dt.strftime("%Y") == value]
-
-    def filter_sentiment_by_period(self, df: pd.DataFrame):
-        if df is None or df.empty or "date" not in df.columns:
-            return df
-        value = self.cb_sent_period_value.currentText()
-        if value in {PERIOD_ALL_LABEL, "전체"}:
-            return df
-        view = self.cb_sent_view.currentText()
-        if view == "월별":
-            return df[df["date"].dt.strftime("%Y-%m") == value]
+        if view == "주별":
+            return df[df["date"].dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d") == value]
+        if view == "일별":
+            return df[df["date"].dt.strftime("%Y-%m-%d") == value]
         return df[df["date"].dt.strftime("%Y") == value]
 
     def load_file(self):
@@ -1458,6 +1709,242 @@ class TextMiningApp(QMainWindow):
         self.statusBar().showMessage("불용어/옵션을 적용했습니다.")
         self.refresh_token_sample()
 
+    def parse_rule_table(self, table):
+        rules = []
+        for row in range(table.rowCount()):
+            first = table.item(row, 0)
+            second = table.item(row, 1) if table.columnCount() > 1 else None
+            if first is None:
+                continue
+            left = first.text().strip()
+            right = second.text().strip() if second else ""
+            if left and right:
+                rules.append((left, right))
+        return rules
+
+    def apply_preprocess_rules(self):
+        raw_stopwords = self.txt_pre_stopwords.toPlainText()
+        tokens = [token.strip() for token in re.split(r"[,\n]", raw_stopwords) if token.strip()]
+        self.preprocess_stopwords = set(tokens)
+        self.preprocess_length_filter = self.sb_min_length.value()
+        self.statusBar().showMessage("전처리 규칙을 적용했습니다.")
+        self.refresh_token_sample()
+        if self.word_freq_df is not None:
+            self.build_wordcloud()
+        if self.graph_full is not None:
+            self.build_network()
+        if self.sentiment_records_df is not None:
+            self.run_sentiment()
+
+    def reset_preprocess_rules(self):
+        self.cb_unicode_norm.setCurrentIndex(0)
+        self.chk_trim_space.setChecked(False)
+        self.chk_unify_quotes.setChecked(False)
+        self.chk_model_punct.setChecked(False)
+        self.chk_repeat_reduce.setChecked(False)
+        self.chk_lowercase.setChecked(False)
+        self.cb_contractions.setCurrentIndex(0)
+        self.chk_lemmatize.setChecked(False)
+        self.txt_pre_stopwords.clear()
+        self.sb_min_length.setValue(0)
+        self.chk_plural_singular.setChecked(False)
+        for table in self.preprocess_tables.values():
+            table.clearContents()
+        self.statusBar().showMessage("전처리 규칙을 초기화했습니다.")
+        self.refresh_token_sample()
+
+    def save_preprocess_rules(self):
+        self.statusBar().showMessage("전처리 규칙을 저장했습니다.")
+
+    def show_preprocess_token_menu(self, pos):
+        menu = QMenu(self)
+        action_delete = menu.addAction("삭제")
+        action_merge = menu.addAction("병합")
+        action = menu.exec_(self.tbl_preprocess_tokens.viewport().mapToGlobal(pos))
+        if action == action_delete:
+            rows = sorted({idx.row() for idx in self.tbl_preprocess_tokens.selectionModel().selectedRows()}, reverse=True)
+            for row in rows:
+                self.tbl_preprocess_tokens.removeRow(row)
+        elif action == action_merge:
+            rows = sorted({idx.row() for idx in self.tbl_preprocess_tokens.selectionModel().selectedRows()})
+            if len(rows) < 2:
+                return
+            tokens = []
+            for row in rows:
+                item = self.tbl_preprocess_tokens.item(row, 0)
+                if item:
+                    tokens.append(item.text())
+            if not tokens:
+                return
+            merged, ok = QInputDialog.getText(
+                self, "토큰 병합", "병합 토큰 입력", text="".join(tokens)
+            )
+            if not ok or not merged.strip():
+                return
+            self.manual_token_merges.append((tokens, merged.strip()))
+            for row in reversed(rows[1:]):
+                self.tbl_preprocess_tokens.removeRow(row)
+            self.tbl_preprocess_tokens.setItem(rows[0], 0, QTableWidgetItem(merged.strip()))
+
+    def save_preprocess_token_edits(self):
+        replacements = {}
+        exclusions = set()
+        tokens_in_table = []
+        for row in range(self.tbl_preprocess_tokens.rowCount()):
+            token_item = self.tbl_preprocess_tokens.item(row, 0)
+            count_item = self.tbl_preprocess_tokens.item(row, 1)
+            if token_item is None or count_item is None:
+                continue
+            token = token_item.text().strip()
+            original = token_item.data(Qt.UserRole)
+            if original and token and token != original:
+                replacements[original] = token
+            if not token:
+                if original:
+                    exclusions.add(original)
+            if token:
+                tokens_in_table.append(token)
+        if hasattr(self, "current_token_freq"):
+            excluded = set(self.current_token_freq.index) - set(tokens_in_table)
+            self.manual_token_exclusions.update(excluded)
+        self.manual_token_replacements.update(replacements)
+        self.manual_token_exclusions.update(exclusions)
+        self.statusBar().showMessage("토큰 편집 결과를 저장했습니다.")
+        self.refresh_token_sample()
+
+    def show_wordcloud_menu(self, pos):
+        menu = QMenu(self)
+        action_delete = menu.addAction("삭제")
+        action = menu.exec_(self.tbl_wc_topn.viewport().mapToGlobal(pos))
+        if action == action_delete:
+            rows = sorted({idx.row() for idx in self.tbl_wc_topn.selectionModel().selectedRows()}, reverse=True)
+            for row in rows:
+                self.tbl_wc_topn.removeRow(row)
+
+    def save_wordcloud_edits(self):
+        replacements = {}
+        exclusions = set()
+        tokens_in_table = []
+        for row in range(self.tbl_wc_topn.rowCount()):
+            token_item = self.tbl_wc_topn.item(row, 0)
+            if token_item is None:
+                continue
+            token = token_item.text().strip()
+            original = token_item.data(Qt.UserRole)
+            if original and token and token != original:
+                replacements[original] = token
+            if original and not token:
+                exclusions.add(original)
+            if token:
+                tokens_in_table.append(token)
+        self.manual_token_replacements.update(replacements)
+        self.manual_token_exclusions.update(exclusions)
+        if self.last_wc_topn:
+            excluded = set(self.last_wc_topn) - set(tokens_in_table)
+            self.manual_token_exclusions.update(excluded)
+        self.statusBar().showMessage("워드클라우드 테이블 편집을 저장했습니다.")
+        self.build_wordcloud()
+
+    def save_network_edits(self):
+        edges = []
+        for row in range(self.tbl_edges.rowCount()):
+            source_item = self.tbl_edges.item(row, 0)
+            target_item = self.tbl_edges.item(row, 1)
+            weight_item = self.tbl_edges.item(row, 2)
+            if not source_item or not target_item:
+                continue
+            source = source_item.text().strip()
+            target = target_item.text().strip()
+            if not source or not target:
+                continue
+            try:
+                weight = float(weight_item.text()) if weight_item else 1.0
+            except ValueError:
+                weight = 1.0
+            edges.append((source, target, weight))
+
+        nodes = set()
+        for row in range(self.tbl_nodes.rowCount()):
+            node_item = self.tbl_nodes.item(row, 0)
+            if not node_item:
+                continue
+            node = node_item.text().strip()
+            if node:
+                nodes.add(node)
+        for source, target, _ in edges:
+            nodes.add(source)
+            nodes.add(target)
+
+        graph = nx.Graph()
+        for node in nodes:
+            graph.add_node(node)
+        for source, target, weight in edges:
+            graph.add_edge(source, target, weight=weight)
+
+        self.graph_full = graph
+        self.graph_view = graph.copy()
+        self.network_pos = None
+        self.network_seed_nodes = []
+        self.network_level_map = {}
+        self.nodes_df = pd.DataFrame(
+            [(node, graph.degree(node)) for node in graph.nodes], columns=["node", "degree"]
+        )
+        self.edges_df = pd.DataFrame(
+            [(u, v, data.get("weight", 1.0)) for u, v, data in graph.edges(data=True)],
+            columns=["source", "target", "weight"],
+        )
+        self.nodes_view_df = self.nodes_df.copy()
+        self.edges_view_df = self.edges_df.copy()
+        self.populate_node_lists(list(graph.nodes))
+        self.draw_network(graph)
+        self.populate_network_tables(self.edges_view_df, self.nodes_view_df)
+        self.statusBar().showMessage("네트워크 테이블 편집을 저장했습니다.")
+
+    def show_sentiment_menu(self, pos):
+        menu = QMenu(self)
+        action_delete = menu.addAction("삭제")
+        action = menu.exec_(self.tbl_sent_records.viewport().mapToGlobal(pos))
+        if action == action_delete:
+            rows = sorted({idx.row() for idx in self.tbl_sent_records.selectionModel().selectedRows()}, reverse=True)
+            for row in rows:
+                self.tbl_sent_records.removeRow(row)
+
+    def save_sentiment_edits(self):
+        if self.sentiment_records_df is None or self.sentiment_records_df.empty:
+            return
+        updated = self.sentiment_records_df.copy()
+        drop_indices = []
+        for row in range(self.tbl_sent_records.rowCount()):
+            date_item = self.tbl_sent_records.item(row, 0)
+            if date_item is None:
+                continue
+            idx = date_item.data(Qt.UserRole)
+            if idx is None:
+                continue
+            sentence_item = self.tbl_sent_records.item(row, 2)
+            if sentence_item is None or not sentence_item.text().strip():
+                drop_indices.append(idx)
+                continue
+            page_type = self.tbl_sent_records.item(row, 1).text() if self.tbl_sent_records.item(row, 1) else ""
+            sentence = sentence_item.text()
+            score_text = self.tbl_sent_records.item(row, 3).text() if self.tbl_sent_records.item(row, 3) else "0"
+            label = self.tbl_sent_records.item(row, 4).text() if self.tbl_sent_records.item(row, 4) else ""
+            topic = self.tbl_sent_records.item(row, 5).text() if self.tbl_sent_records.item(row, 5) else ""
+            try:
+                score = int(float(score_text))
+            except ValueError:
+                score = 0
+            updated.at[idx, "page_type"] = page_type
+            updated.at[idx, "sentence"] = sentence
+            updated.at[idx, "score"] = score
+            updated.at[idx, "label"] = label
+            updated.at[idx, "topic"] = topic
+        if drop_indices:
+            updated = updated.drop(index=drop_indices, errors="ignore")
+        self.sentiment_records_df = updated
+        self.update_sentiment_view()
+        self.statusBar().showMessage("감성 테이블 편집을 저장했습니다.")
+
     def show_token_menu(self, pos):
         selection = self.tbl_token_sample.selectionModel().selectedRows()
         if selection:
@@ -1507,21 +1994,126 @@ class TextMiningApp(QMainWindow):
         ))
         series = pd.Series(tokens)
         freq = series.value_counts()
+        self.current_token_freq = freq
         self.tbl_token_sample.setRowCount(len(freq))
         for row_idx, (token, count) in enumerate(freq.items()):
-            self.tbl_token_sample.setItem(row_idx, 0, QTableWidgetItem(token))
+            token_item = QTableWidgetItem(token)
+            token_item.setData(Qt.UserRole, token)
+            self.tbl_token_sample.setItem(row_idx, 0, token_item)
             self.tbl_token_sample.setItem(row_idx, 1, QTableWidgetItem(str(count)))
+        if hasattr(self, "tbl_preprocess_tokens"):
+            self.tbl_preprocess_tokens.setRowCount(len(freq))
+            for row_idx, (token, count) in enumerate(freq.items()):
+                token_item = QTableWidgetItem(token)
+                token_item.setData(Qt.UserRole, token)
+                self.tbl_preprocess_tokens.setItem(row_idx, 0, token_item)
+                self.tbl_preprocess_tokens.setItem(row_idx, 1, QTableWidgetItem(str(count)))
+            self.lbl_preprocess_count.setText(f"토큰 {len(tokens)} / 고유 {len(freq)}")
 
-    def tokenize_text(self, text: str):
+    def apply_replacements(self, text: str, rules):
+        for src, dest in rules:
+            if not src:
+                continue
+            text = re.sub(re.escape(src), dest, text)
+        return text
+
+    def apply_preprocess_text(self, text: str) -> str:
         if not isinstance(text, str):
+            return ""
+        text = text.strip()
+        norm_mode = self.cb_unicode_norm.currentText() if hasattr(self, "cb_unicode_norm") else "사용 안 함"
+        if norm_mode in {"NFKC", "NFC"}:
+            text = unicodedata.normalize(norm_mode, text)
+        if getattr(self, "chk_trim_space", None) and self.chk_trim_space.isChecked():
+            text = SPACE_RE.sub(" ", text).strip()
+        if getattr(self, "chk_unify_quotes", None) and self.chk_unify_quotes.isChecked():
+            text = text.translate(DASH_TRANSLATION).translate(QUOTE_TRANSLATION)
+        if getattr(self, "chk_model_punct", None) and self.chk_model_punct.isChecked():
+            text = re.sub(r"([A-Za-z])[-_\s]+(\d)", r"\1\2", text)
+            text = re.sub(r"(\d)[-_\s]+([A-Za-z])", r"\1\2", text)
+        if hasattr(self, "tbl_join_map"):
+            text = self.apply_replacements(text, self.parse_rule_table(self.tbl_join_map))
+        if hasattr(self, "tbl_ko_en_map"):
+            text = self.apply_replacements(text, self.parse_rule_table(self.tbl_ko_en_map))
+        if hasattr(self, "tbl_compound_map"):
+            text = self.apply_replacements(text, self.parse_rule_table(self.tbl_compound_map))
+        if getattr(self, "chk_repeat_reduce", None) and self.chk_repeat_reduce.isChecked():
+            text = re.sub(r"(.)\1{2,}", r"\1\1", text)
+        if getattr(self, "chk_lowercase", None) and self.chk_lowercase.isChecked():
+            text = text.lower()
+        if getattr(self, "cb_contractions", None) and self.cb_contractions.currentText().endswith("적용"):
+            for src, dest in CONTRACTIONS_MAP.items():
+                text = re.sub(rf"\b{re.escape(src)}\b", dest, text, flags=re.IGNORECASE)
+        return text
+
+    def get_pos_filter_tags(self):
+        if getattr(self, "rb_pos_all", None) and self.rb_pos_all.isChecked():
+            return {"NNG", "NNP", "NNB", "NR", "NP", "VA", "VV", "VX"}
+        if getattr(self, "rb_pos_noun_adj", None) and self.rb_pos_noun_adj.isChecked():
+            return {"NNG", "NNP", "NNB", "NR", "NP", "VA"}
+        if getattr(self, "rb_pos_noun_verb", None) and self.rb_pos_noun_verb.isChecked():
+            return {"NNG", "NNP", "NNB", "NR", "NP", "VV", "VX"}
+        return {"NNG", "NNP", "NNB", "NR", "NP"}
+
+    def merge_token_sequences(self, tokens, merge_rules):
+        if not merge_rules:
+            return tokens
+        idx = 0
+        merged = []
+        while idx < len(tokens):
+            matched = False
+            for seq, replacement in merge_rules:
+                if tokens[idx : idx + len(seq)] == seq:
+                    merged.append(replacement)
+                    idx += len(seq)
+                    matched = True
+                    break
+            if not matched:
+                merged.append(tokens[idx])
+                idx += 1
+        return merged
+
+    def apply_post_token_rules(self, tokens):
+        if not tokens:
             return []
-        analysis = self.kiwi.analyze(text)
-        if not analysis or not analysis[0][0]:
-            return []
-        tokens = [token for token, _, _, _ in analysis[0][0]]
-        cleaned = []
+        map_rules = dict(self.parse_rule_table(self.tbl_repr_map)) if hasattr(self, "tbl_repr_map") else {}
+        syn_rules = dict(self.parse_rule_table(self.tbl_syn_map)) if hasattr(self, "tbl_syn_map") else {}
+        model_rules = dict(self.parse_rule_table(self.tbl_model_map)) if hasattr(self, "tbl_model_map") else {}
+        merge_rules_raw = self.parse_rule_table(self.tbl_merge_tokens) if hasattr(self, "tbl_merge_tokens") else []
+        merge_rules = []
+        for src, dest in merge_rules_raw:
+            seq = [part.strip() for part in re.split(r"[+ ]", src) if part.strip()]
+            if seq and dest:
+                merge_rules.append((seq, dest))
+        merge_rules.extend(self.manual_token_merges)
+
+        updated = []
         for token in tokens:
-            if token in self.stopwords:
+            if token in self.manual_token_exclusions:
+                continue
+            token = self.manual_token_replacements.get(token, token)
+            token = map_rules.get(token, token)
+            token = syn_rules.get(token, token)
+            token = model_rules.get(token, token)
+            if getattr(self, "chk_lemmatize", None) and self.chk_lemmatize.isChecked():
+                if re.fullmatch(r"[A-Za-z]+", token):
+                    if token.endswith("ing") and len(token) > 4:
+                        token = token[:-3]
+                    elif token.endswith("ed") and len(token) > 3:
+                        token = token[:-2]
+            if getattr(self, "chk_plural_singular", None) and self.chk_plural_singular.isChecked():
+                if re.fullmatch(r"[A-Za-z]+", token):
+                    if token.endswith("s") and len(token) > 3 and not token.endswith("ss"):
+                        token = token[:-1]
+            updated.append(token)
+
+        updated = self.merge_token_sequences(updated, merge_rules)
+
+        filtered = []
+        for token in updated:
+            if token in self.stopwords or token in self.preprocess_stopwords:
+                continue
+            if self.preprocess_length_filter and len(token) <= self.preprocess_length_filter:
                 continue
             if self.clean_opts.get("remove_numbers") and re.search(r"\d", token):
                 continue
@@ -1533,8 +2125,19 @@ class TextMiningApp(QMainWindow):
                 continue
             if self.clean_opts.get("english_only") and not re.fullmatch(r"[A-Za-z]+", token):
                 continue
-            cleaned.append(token)
-        return cleaned
+            filtered.append(token)
+        return filtered
+
+    def tokenize_text(self, text: str):
+        if not isinstance(text, str):
+            return []
+        text = self.apply_preprocess_text(text)
+        analysis = self.kiwi.analyze(text)
+        if not analysis or not analysis[0][0]:
+            return []
+        allowed_tags = self.get_pos_filter_tags()
+        tokens = [token for token, tag, _, _ in analysis[0][0] if tag in allowed_tags]
+        return self.apply_post_token_rules(tokens)
 
     def parse_custom_terms(self, raw_text: str):
         if not raw_text:
@@ -1577,10 +2180,8 @@ class TextMiningApp(QMainWindow):
             "Set2",
             "tab10",
         ]
-        shapes = ["circle", "diamond", "triangle", "square"]
         colormap = random.choice(colormaps)
-        shape = random.choice(shapes)
-        mask = self.build_wordcloud_mask(shape)
+        mask = self.build_wordcloud_mask("square")
         return colormap, mask
 
     def build_buzz(self):
@@ -1642,12 +2243,79 @@ class TextMiningApp(QMainWindow):
                 ylabel = "count"
             self.buzz_canvas.plot_bar(labels, values, "버즈량", ylabel)
         self.chart_images["buzz"] = self.save_chart(self.buzz_canvas, "buzz")
+        self.buzz_bucket_labels = labels
+        self.buzz_bucket_dates = list(summary["bucket"])
 
         self.tbl_buzz.setRowCount(len(summary))
         for row_idx, (_, row) in enumerate(summary.iterrows()):
             self.tbl_buzz.setItem(row_idx, 0, QTableWidgetItem(self.format_date(row["bucket"])))
             self.tbl_buzz.setItem(row_idx, 1, QTableWidgetItem(str(row["page_type"])))
             self.tbl_buzz.setItem(row_idx, 2, QTableWidgetItem(str(row["count"])))
+
+    def on_buzz_click(self, event):
+        if self.df_clean is None or event.xdata is None:
+            return
+        if not hasattr(self, "buzz_bucket_labels"):
+            return
+        idx = int(round(event.xdata))
+        if idx < 0 or idx >= len(self.buzz_bucket_labels):
+            return
+        bucket = self.buzz_bucket_dates[idx]
+        df = self.df_clean.copy()
+        gran = self.cb_granularity.currentText()
+        if gran == "월":
+            df["bucket"] = df["date"].dt.to_period("M").dt.start_time
+        elif gran == "주":
+            df["bucket"] = df["date"].dt.to_period("W").dt.start_time
+        elif gran == "일":
+            df["bucket"] = df["date"].dt.normalize()
+        else:
+            df["bucket"] = df["date"].dt.to_period("Y").dt.start_time
+        df = df[df["bucket"] == bucket]
+        selected_page = self.cb_page_type_filter.currentText()
+        if selected_page != "전체":
+            df = df[df["page_type"] == selected_page]
+
+        if df.empty:
+            return
+
+        tokens = list(itertools.chain.from_iterable(
+            self.tokenize_text(text) for text in df["full_text"]
+        ))
+        freq = pd.Series(tokens).value_counts()
+        hot_topics = freq.head(10).index.tolist()
+
+        prev_bucket = None
+        if idx > 0:
+            prev_bucket = self.buzz_bucket_dates[idx - 1]
+        hot_delta = []
+        if prev_bucket is not None:
+            prev_df = self.df_clean.copy()
+            if gran == "월":
+                prev_df["bucket"] = prev_df["date"].dt.to_period("M").dt.start_time
+            elif gran == "주":
+                prev_df["bucket"] = prev_df["date"].dt.to_period("W").dt.start_time
+            elif gran == "일":
+                prev_df["bucket"] = prev_df["date"].dt.normalize()
+            else:
+                prev_df["bucket"] = prev_df["date"].dt.to_period("Y").dt.start_time
+            prev_df = prev_df[prev_df["bucket"] == prev_bucket]
+            if selected_page != "전체":
+                prev_df = prev_df[prev_df["page_type"] == selected_page]
+            prev_tokens = list(itertools.chain.from_iterable(
+                self.tokenize_text(text) for text in prev_df["full_text"]
+            ))
+            prev_freq = pd.Series(prev_tokens).value_counts()
+            delta = (freq - prev_freq).fillna(0).sort_values(ascending=False)
+            hot_delta = delta.head(10).index.tolist()
+
+        voc_samples = df["full_text"].head(3).tolist()
+        self.lbl_buzz_filters.setText(
+            f"기간/채널: {self.format_date(bucket)} / {selected_page}"
+        )
+        self.txt_buzz_hot.setPlainText("\n".join(hot_delta or hot_topics))
+        self.txt_buzz_top.setPlainText("\n".join(hot_topics))
+        self.txt_buzz_voc.setPlainText("\n".join(voc_samples))
 
     def build_wordcloud(self):
         if self.df_clean is None:
@@ -1673,7 +2341,7 @@ class TextMiningApp(QMainWindow):
         if self.chk_wc_random_style.isChecked():
             colormap, mask = self.random_wordcloud_style()
         else:
-            colormap, mask = "Blues", None
+            colormap, mask = "Blues", self.build_wordcloud_mask("square")
         wordcloud = WordCloud(
             width=800,
             height=500,
@@ -1681,8 +2349,12 @@ class TextMiningApp(QMainWindow):
             font_path=str(font_path) if font_path else None,
             colormap=colormap,
             mask=mask,
+            repeat=True,
+            prefer_horizontal=1.0,
+            collocations=False,
         )
-        wc_img = wordcloud.generate_from_frequencies(freq.head(topn).to_dict())
+        top_freq = freq.head(topn)
+        wc_img = wordcloud.generate_from_frequencies(top_freq.to_dict())
         wc_path = os.path.join(os.getcwd(), "wordcloud.png")
         wc_img.to_file(wc_path)
         self.wc_image_path = wc_path
@@ -1691,10 +2363,13 @@ class TextMiningApp(QMainWindow):
         pixmap = QPixmap(wc_path)
         self.lbl_wc_view.setPixmap(pixmap.scaled(self.lbl_wc_view.size(), Qt.KeepAspectRatio))
 
-        top_freq = freq.head(topn)
+        self.last_wc_topn = list(top_freq.index)
+        self.last_wc_topn_value = topn
         self.tbl_wc_topn.setRowCount(len(top_freq))
         for row_idx, (token, count) in enumerate(top_freq.items()):
-            self.tbl_wc_topn.setItem(row_idx, 0, QTableWidgetItem(token))
+            token_item = QTableWidgetItem(token)
+            token_item.setData(Qt.UserRole, token)
+            self.tbl_wc_topn.setItem(row_idx, 0, token_item)
             self.tbl_wc_topn.setItem(row_idx, 1, QTableWidgetItem(str(count)))
 
     def toggle_network_advanced(self):
@@ -1830,6 +2505,7 @@ class TextMiningApp(QMainWindow):
 
     def populate_node_lists(self, nodes):
         self.list_nodes_ranked.clear()
+        self.last_nodes_ranked = list(nodes)
         for node in nodes:
             self.list_nodes_ranked.addItem(node)
 
@@ -1931,28 +2607,20 @@ class TextMiningApp(QMainWindow):
         degrees = [graph.degree(node) for node in graph.nodes]
         max_degree = max(degrees) if degrees else 1
         sizes = [200 + 1200 * (deg / max_degree) for deg in degrees]
-        if self.network_level_map:
-            level_palette = {
-                1: "#ff6fae",
-                2: "#4a4a4a",
-                3: "#9e9e9e",
-            }
-            node_colors = [
-                level_palette.get(self.network_level_map.get(node, 3), "#9e9e9e")
-                for node in graph.nodes
-            ]
-        else:
-            norm = colors.Normalize(vmin=0, vmax=max_degree or 1)
-            cmap = cm.get_cmap("Set2")
-            node_colors = [cmap(norm(deg)) for deg in degrees]
+        node_colors = ["#f4d03f" for _ in graph.nodes]
         edge_weights = [data.get("weight", 1.0) for _, _, data in graph.edges(data=True)]
         max_weight = max(edge_weights) if edge_weights else 1.0
         edge_widths = [0.6 + 3.0 * (weight / max_weight) for weight in edge_weights]
+        edge_norm = colors.Normalize(vmin=0, vmax=max_weight or 1.0)
+        edge_colors = [
+            colors.to_hex(cm.Greys(0.2 + 0.7 * edge_norm(weight)))
+            for weight in edge_weights
+        ]
         nx.draw_networkx_nodes(
             graph, pos, ax=self.network_canvas.ax, node_size=sizes, node_color=node_colors
         )
         nx.draw_networkx_edges(
-            graph, pos, ax=self.network_canvas.ax, width=edge_widths, edge_color="#999999", alpha=0.7
+            graph, pos, ax=self.network_canvas.ax, width=edge_widths, edge_color=edge_colors, alpha=0.9
         )
         label_kwargs = {"font_size": 8}
         if self.network_font_name:
@@ -2096,6 +2764,7 @@ class TextMiningApp(QMainWindow):
             self.txt_voc.clear()
             self.statusBar().showMessage("선택한 기간에 감성 데이터가 없습니다.")
             return
+        self.update_sentiment_range_label(df)
         mode = self.cb_sent_mode.currentText()
         topic_filter = self.cb_brand_filter.currentText()
         self.cb_brand_filter.setEnabled(mode == "사전별 감성")
@@ -2105,6 +2774,10 @@ class TextMiningApp(QMainWindow):
         view = self.cb_sent_view.currentText()
         if view == "월별":
             df["bucket"] = df["date"].dt.strftime("%Y-%m")
+        elif view == "주별":
+            df["bucket"] = df["date"].dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
+        elif view == "일별":
+            df["bucket"] = df["date"].dt.strftime("%Y-%m-%d")
         else:
             df["bucket"] = df["date"].dt.strftime("%Y")
 
@@ -2139,6 +2812,33 @@ class TextMiningApp(QMainWindow):
         self.plot_sentiment_trend(df)
         self.update_voc_summary(df)
 
+    def update_sentiment_range_label(self, df):
+        if df is None or df.empty:
+            self.lbl_sent_period_range.setText("")
+            return
+        min_date = df["date"].min()
+        max_date = df["date"].max()
+        view = self.cb_sent_view.currentText()
+        if view == "월별":
+            label = f"{min_date.strftime('%Y년 %m월')} ~ {max_date.strftime('%Y년 %m월')}"
+        elif view == "주별":
+            min_week = (min_date.day - 1) // 7 + 1
+            max_week = (max_date.day - 1) // 7 + 1
+            label = (
+                f"{min_date.strftime('%Y년 %m월')} {min_week}주 ~ "
+                f"{max_date.strftime('%Y년 %m월')} {max_week}주"
+            )
+        elif view == "일별":
+            min_week = (min_date.day - 1) // 7 + 1
+            max_week = (max_date.day - 1) // 7 + 1
+            label = (
+                f"{min_date.strftime('%Y년 %m월')} {min_week}주 {min_date.day}일 ~ "
+                f"{max_date.strftime('%Y년 %m월')} {max_week}주 {max_date.day}일"
+            )
+        else:
+            label = f"{min_date.strftime('%Y년')} ~ {max_date.strftime('%Y년')}"
+        self.lbl_sent_period_range.setText(label)
+
     def populate_sentiment_table(self, df):
         show_records = df.head(200)
         self.tbl_sent_records.setRowCount(len(show_records))
@@ -2151,8 +2851,10 @@ class TextMiningApp(QMainWindow):
             "label",
             "topic",
         ])
-        for row_idx, (_, row) in enumerate(show_records.iterrows()):
-            self.tbl_sent_records.setItem(row_idx, 0, QTableWidgetItem(self.format_date(row["date"])))
+        for row_idx, (idx, row) in enumerate(show_records.iterrows()):
+            date_item = QTableWidgetItem(self.format_date(row["date"]))
+            date_item.setData(Qt.UserRole, idx)
+            self.tbl_sent_records.setItem(row_idx, 0, date_item)
             self.tbl_sent_records.setItem(row_idx, 1, QTableWidgetItem(str(row["page_type"])))
             self.tbl_sent_records.setItem(row_idx, 2, QTableWidgetItem(str(row["sentence"])))
             self.tbl_sent_records.setItem(row_idx, 3, QTableWidgetItem(str(row["score"])))
@@ -2270,31 +2972,32 @@ class TextMiningApp(QMainWindow):
             return
         score_order = [-2, -1, 0, 1, 2]
         labels = [self.sentiment_bucket_label(score) for score in score_order]
-        topics = sorted(df["topic"].dropna().unique())
-        if not topics:
-            return
-        for topic in topics:
-            sub = df[df["topic"] == topic]
-            counts = (
-                sub.groupby("score")
-                .size()
-                .reindex(score_order, fill_value=0)
-                .astype(float)
+        metric = self.cb_sent_metric.currentText()
+        summary = df.groupby(["topic", "score"]).size().reset_index(name="count")
+        pivot = summary.pivot_table(index="topic", columns="score", values="count", fill_value=0)
+        pivot = pivot.reindex(columns=score_order, fill_value=0)
+        if metric == "%":
+            pivot = pivot.div(pivot.sum(axis=1).replace(0, 1), axis=0) * 100
+            ylabel = "%"
+        else:
+            ylabel = "count"
+        topics = list(pivot.index)
+        series = [
+            (label, pivot[score].tolist(), SENTIMENT_COLORS.get(score, "#999999"))
+            for label, score in zip(labels, score_order)
+        ]
+        self.sent_topic_canvas.ax.clear()
+        x_positions = list(range(len(topics)))
+        bottoms = [0] * len(topics)
+        for label, values, color in series:
+            bars = self.sent_topic_canvas.ax.bar(
+                x_positions, values, bottom=bottoms, label=label, color=color
             )
-            total = counts.sum() or 1.0
-            percents = [round(value / total * 100, 2) for value in counts.tolist()]
-            canvas = ChartCanvas()
-            canvas.ax.clear()
-            x_positions = [0]
-            bottoms = [0.0]
-            for score, label, value in zip(score_order, labels, percents):
-                values = [value]
-                color = SENTIMENT_COLORS.get(score, "#999999")
-                bars = canvas.ax.bar(x_positions, values, bottom=bottoms, label=label, color=color)
+            if metric == "%":
                 for bar, bottom, value in zip(bars, bottoms, values):
                     if value <= 0:
                         continue
-                    canvas.ax.text(
+                    self.sent_topic_canvas.ax.text(
                         bar.get_x() + bar.get_width() / 2,
                         bottom + value / 2,
                         f"{value:.1f}%",
@@ -2303,16 +3006,15 @@ class TextMiningApp(QMainWindow):
                         fontsize=8,
                         color="white" if value >= 15 else "#333333",
                     )
-                bottoms = [b + v for b, v in zip(bottoms, values)]
-            canvas.ax.set_xticks(x_positions)
-            canvas.ax.set_xticklabels([topic])
-            canvas.ax.set_ylim(0, 100)
-            canvas.ax.set_title(f"{topic} 감성 비율")
-            canvas.ax.set_ylabel("%")
-            canvas.ax.legend(loc="upper right")
-            canvas.figure.tight_layout()
-            canvas.draw()
-            self.sent_topic_charts_layout.addWidget(canvas)
+            bottoms = [b + v for b, v in zip(bottoms, values)]
+        self.sent_topic_canvas.ax.set_xticks(x_positions)
+        self.sent_topic_canvas.ax.set_xticklabels(topics, rotation=45, ha="right")
+        self.sent_topic_canvas.ax.set_ylabel(ylabel)
+        self.sent_topic_canvas.ax.set_title("사전 대표단어 감성 스택")
+        self.sent_topic_canvas.ax.legend(loc="upper right")
+        self.sent_topic_canvas.figure.tight_layout()
+        self.sent_topic_canvas.draw()
+        self.sent_topic_charts_layout.addWidget(self.sent_topic_canvas)
 
     def plot_sentiment_trend(self, df):
         if df is None or df.empty:
@@ -2322,6 +3024,10 @@ class TextMiningApp(QMainWindow):
         view = self.cb_sent_view.currentText()
         if view == "월별":
             df["bucket"] = df["date"].dt.strftime("%Y-%m")
+        elif view == "주별":
+            df["bucket"] = df["date"].dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
+        elif view == "일별":
+            df["bucket"] = df["date"].dt.strftime("%Y-%m-%d")
         else:
             df["bucket"] = df["date"].dt.strftime("%Y")
         score_order = [-2, -1, 0, 1, 2]
@@ -2400,10 +3106,10 @@ class TextMiningApp(QMainWindow):
                 self.buzz_df.to_excel(writer, sheet_name="buzz_summary", index=False)
             if "word_freq_topN" in items and self.word_freq_df is not None:
                 self.word_freq_df.to_excel(writer, sheet_name="word_freq_topN", index=False)
-            if "network_nodes" in items and self.nodes_view_df is not None:
-                self.nodes_view_df.to_excel(writer, sheet_name="network_nodes", index=False)
-            if "network_edges" in items and self.edges_view_df is not None:
-                self.edges_view_df.to_excel(writer, sheet_name="network_edges", index=False)
+            if "network_nodes" in items and self.nodes_df is not None:
+                self.nodes_df.to_excel(writer, sheet_name="network_nodes", index=False)
+            if "network_edges" in items and self.edges_df is not None:
+                self.edges_df.to_excel(writer, sheet_name="network_edges", index=False)
             if "sentiment_records" in items and self.sentiment_records_df is not None:
                 self.sentiment_records_df.to_excel(writer, sheet_name="sentiment_records", index=False)
             if "sentiment_summary" in items and self.sentiment_summary_df is not None:
