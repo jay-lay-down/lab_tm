@@ -1,17 +1,19 @@
 import itertools
 import json
 import os
+import random
 import re
 import sys
-from typing import List
 from datetime import datetime
 from pathlib import Path
+from typing import List
 
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib import cm, colors
 from matplotlib import font_manager as fm
 import networkx as nx
+import numpy as np
 import pandas as pd
 import requests
 from kiwipiepy import Kiwi
@@ -37,6 +39,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSplitter,
     QSpinBox,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -62,6 +65,18 @@ FALLBACK_FONT_NAMES = [
     "Noto Sans CJK KR",
     "Noto Sans KR",
 ]
+SENTIMENT_COLORS = {
+    2: "#1f4e99",
+    1: "#4a86e8",
+    0: "#9e9e9e",
+    -1: "#e53935",
+    -2: "#b71c1c",
+}
+EMOTICON_PATTERN = re.compile(r"(ㅠㅠ|ㅜㅜ|ㅎㅎ|ㅋㅋ|ㅋ{2,}|ㅎ{2,})")
+PROFANITY_PATTERN = re.compile(r"(ㅅㅂ|시발|씨발|ㅆㅂ|존나|ㅈㄴ|개)")
+POSITIVE_PATTERN = re.compile(r"(좋다|좋아|최고|추천|만족|굿|대박|good|굿)")
+NEGATION_TOKENS = {"안", "못", "별로", "전혀", "아니", "없", "않"}
+CONTRAST_TOKENS = ["하지만", "근데", "그런데", "그러나"]
 
 
 def resource_path(rel_path: str) -> str:
@@ -269,6 +284,21 @@ class ChartCanvas(FigureCanvas):
         self.figure.tight_layout()
         self.draw()
 
+    def plot_multi_line(self, labels, series, title, ylabel, colors_map=None):
+        self.ax.clear()
+        if labels and series:
+            for name, values in series:
+                color = colors_map.get(name) if colors_map else None
+                self.ax.plot(labels, values, marker="o", label=name, color=color)
+            self.ax.set_xticks(range(len(labels)))
+            self.ax.set_xticklabels(labels, rotation=45, ha="right")
+            self.ax.legend()
+        self.ax.set_title(title)
+        self.ax.set_ylabel(ylabel)
+        self.ax.grid(axis="y", alpha=0.3)
+        self.figure.tight_layout()
+        self.draw()
+
     def plot_multi_bar(self, labels, series, title, ylabel):
         self.ax.clear()
         if labels and series:
@@ -305,6 +335,35 @@ class ChartCanvas(FigureCanvas):
         self.figure.tight_layout()
         self.draw()
 
+    def plot_stacked_bar_with_labels(self, labels, series, title, ylabel, fmt="{:.1f}%"):
+        self.ax.clear()
+        if labels and series:
+            x_positions = list(range(len(labels)))
+            bottoms = [0] * len(labels)
+            for name, values in series:
+                bars = self.ax.bar(x_positions, values, bottom=bottoms, label=name)
+                for bar, bottom, value in zip(bars, bottoms, values):
+                    if value <= 0:
+                        continue
+                    self.ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bottom + value / 2,
+                        fmt.format(value),
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color="white" if value >= 15 else "#333333",
+                    )
+                bottoms = [b + v for b, v in zip(bottoms, values)]
+            self.ax.set_xticks(x_positions)
+            self.ax.set_xticklabels(labels, rotation=45, ha="right")
+            self.ax.legend()
+        self.ax.set_title(title)
+        self.ax.set_ylabel(ylabel)
+        self.ax.grid(axis="y", alpha=0.3)
+        self.figure.tight_layout()
+        self.draw()
+
 
 class TextMiningApp(QMainWindow):
     def __init__(self):
@@ -324,6 +383,9 @@ class TextMiningApp(QMainWindow):
         self.graph_view = None
         self.network_pos = None
         self.network_drag_node = None
+        self.network_seed_nodes = []
+        self.network_level_map = {}
+        self.network_stopwords = set()
         self.nodes_df = None
         self.edges_df = None
         self.nodes_view_df = None
@@ -331,6 +393,8 @@ class TextMiningApp(QMainWindow):
         self.sentiment_records_df = None
         self.sentiment_summary_df = None
         self.chart_images = {}
+        self.monthly_sampling_enabled = False
+        self.monthly_sampling_checkboxes = []
 
         self.senti_dict = None
         self.senti_max_n = 1
@@ -432,7 +496,7 @@ class TextMiningApp(QMainWindow):
         top.setFixedHeight(80)
         top_layout = QGridLayout(top)
         self.cb_granularity = QComboBox()
-        self.cb_granularity.addItems(["연도", "월"])
+        self.cb_granularity.addItems(["연도", "월", "주", "일"])
         self.cb_buzz_period_unit = self.cb_granularity
         self.cb_buzz_period_value = QComboBox()
         self.cb_buzz_period_unit.currentIndexChanged.connect(
@@ -533,10 +597,12 @@ class TextMiningApp(QMainWindow):
         opts_row.addWidget(self.chk_remove_single)
         opts_row.addWidget(self.chk_korean_only)
         opts_row.addWidget(self.chk_english_only)
+        self.chk_monthly_sample_text = self.create_monthly_sampling_checkbox()
         self.btn_apply_stopwords = QPushButton("불용어/옵션 적용")
         self.btn_apply_stopwords.clicked.connect(self.apply_stopwords)
         stop_layout.addWidget(self.txt_stopwords)
         stop_layout.addLayout(opts_row)
+        stop_layout.addWidget(self.chk_monthly_sample_text)
         stop_layout.addWidget(self.btn_apply_stopwords)
 
         left_split.addWidget(topic_group)
@@ -562,7 +628,7 @@ class TextMiningApp(QMainWindow):
         layout = QVBoxLayout(tab)
 
         top = QWidget()
-        top.setFixedHeight(70)
+        top.setFixedHeight(90)
         top_layout = QGridLayout(top)
         self.cb_wc_period_unit = QComboBox()
         self.cb_wc_period_unit.addItems(["연도", "월"])
@@ -581,6 +647,8 @@ class TextMiningApp(QMainWindow):
         self.cb_wc_topn.currentIndexChanged.connect(self.refresh_token_sample)
         self.btn_build_wc = QPushButton("워드클라우드 생성")
         self.btn_build_wc.clicked.connect(self.build_wordcloud)
+        self.chk_wc_random_style = QCheckBox("랜덤 팔레트/모양 사용")
+        self.chk_monthly_sample_wc = self.create_monthly_sampling_checkbox()
         self.lbl_wc_count = QLabel("토큰 0 / 고유 0")
         top_layout.addWidget(QLabel("기간 단위"), 0, 0)
         top_layout.addWidget(self.cb_wc_period_unit, 0, 1)
@@ -588,8 +656,10 @@ class TextMiningApp(QMainWindow):
         top_layout.addWidget(self.cb_wc_period_value, 0, 3)
         top_layout.addWidget(QLabel("Top N"), 0, 4)
         top_layout.addWidget(self.cb_wc_topn, 0, 5)
-        top_layout.addWidget(self.btn_build_wc, 0, 6)
-        top_layout.addWidget(self.lbl_wc_count, 0, 7)
+        top_layout.addWidget(self.chk_wc_random_style, 0, 6)
+        top_layout.addWidget(self.chk_monthly_sample_wc, 0, 7)
+        top_layout.addWidget(self.btn_build_wc, 0, 8)
+        top_layout.addWidget(self.lbl_wc_count, 0, 9)
 
         layout.addWidget(top)
 
@@ -664,6 +734,9 @@ class TextMiningApp(QMainWindow):
         self.cb_weight_mode.currentIndexChanged.connect(self.handle_pmi_guard)
         self.chk_drag_mode = QCheckBox("노드 위치 편집")
         self.chk_drag_mode.toggled.connect(self.redraw_network)
+        self.chk_monthly_sample_network = self.create_monthly_sampling_checkbox()
+        self.le_network_stopwords = QLineEdit()
+        self.le_network_stopwords.setPlaceholderText("네트워크 전용 불용어 (쉼표/줄바꿈)")
         self.lbl_network_reco = QLabel("데이터 기준 권장값: -")
         self.lbl_advanced_hint = QLabel(
             "PMI는 희귀 단어쌍을 과대평가할 수 있어 min_node_count ≥ 10, "
@@ -690,8 +763,10 @@ class TextMiningApp(QMainWindow):
         top_layout.addWidget(self.cb_cooc_scope, 2, 0, 1, 2)
         top_layout.addWidget(self.cb_weight_mode, 2, 2, 1, 2)
         top_layout.addWidget(self.chk_drag_mode, 2, 4)
-        top_layout.addWidget(self.lbl_network_reco, 2, 5, 1, 4)
-        top_layout.addWidget(self.lbl_advanced_hint, 2, 9, 1, 3)
+        top_layout.addWidget(self.chk_monthly_sample_network, 2, 5)
+        top_layout.addWidget(self.le_network_stopwords, 2, 6, 1, 3)
+        top_layout.addWidget(self.lbl_network_reco, 2, 9, 1, 2)
+        top_layout.addWidget(self.lbl_advanced_hint, 2, 11, 1, 2)
 
         splitter.addWidget(top)
 
@@ -729,26 +804,20 @@ class TextMiningApp(QMainWindow):
         layout = QVBoxLayout(tab)
 
         top = QWidget()
-        top.setFixedHeight(120)
-        top_layout = QGridLayout(top)
-        self.cb_sent_period_unit = QComboBox()
-        self.cb_sent_period_unit.addItems(["연도", "월"])
+        top.setFixedHeight(190)
+        top_layout = QVBoxLayout(top)
+        filter_row = QWidget()
+        filter_layout = QGridLayout(filter_row)
         self.cb_sent_period_value = QComboBox()
-        self.cb_sent_period_unit.currentIndexChanged.connect(
-            lambda: (
-                self.populate_period_values(
-                    self.cb_sent_period_unit, self.cb_sent_period_value, self.df_clean
-                ),
-                self.update_sentiment_view(),
-            )
-        )
         self.cb_sent_period_value.currentIndexChanged.connect(self.update_sentiment_view)
         self.cb_sent_mode = QComboBox()
         self.cb_sent_mode.addItems(["전체 감성", "사전별 감성"])
         self.cb_sent_mode.currentIndexChanged.connect(self.update_sentiment_view)
         self.cb_sent_view = QComboBox()
         self.cb_sent_view.addItems(["연도별", "월별"])
-        self.cb_sent_view.currentIndexChanged.connect(self.update_sentiment_view)
+        self.cb_sent_view.currentIndexChanged.connect(
+            lambda: (self.populate_sentiment_period_values(), self.update_sentiment_view())
+        )
         self.cb_sent_metric = QComboBox()
         self.cb_sent_metric.addItems(["count", "%"])
         self.cb_sent_metric.currentIndexChanged.connect(self.update_sentiment_view)
@@ -759,22 +828,48 @@ class TextMiningApp(QMainWindow):
         self.cb_brand_filter.currentIndexChanged.connect(self.update_sentiment_view)
         self.btn_run_sentiment = QPushButton("감성분석 실행")
         self.btn_run_sentiment.clicked.connect(self.run_sentiment)
+        self.chk_monthly_sample_sent = self.create_monthly_sampling_checkbox()
 
-        top_layout.addWidget(QLabel("기간 단위"), 0, 0)
-        top_layout.addWidget(self.cb_sent_period_unit, 0, 1)
-        top_layout.addWidget(QLabel("기간 선택"), 0, 2)
-        top_layout.addWidget(self.cb_sent_period_value, 0, 3)
-        top_layout.addWidget(QLabel("모드"), 0, 4)
-        top_layout.addWidget(self.cb_sent_mode, 0, 5)
-        top_layout.addWidget(QLabel("보기"), 0, 6)
-        top_layout.addWidget(self.cb_sent_view, 0, 7)
-        top_layout.addWidget(QLabel("지표"), 0, 8)
-        top_layout.addWidget(self.cb_sent_metric, 0, 9)
-        top_layout.addWidget(QLabel("문장 분리"), 1, 0)
-        top_layout.addWidget(self.cb_sentence_split, 1, 1)
-        top_layout.addWidget(self.btn_run_sentiment, 1, 2)
-        top_layout.addWidget(QLabel("토픽"), 1, 3)
-        top_layout.addWidget(self.cb_brand_filter, 1, 4, 1, 2)
+        filter_layout.addWidget(QLabel("기간 선택"), 0, 0)
+        filter_layout.addWidget(self.cb_sent_period_value, 0, 1)
+        filter_layout.addWidget(QLabel("모드"), 0, 2)
+        filter_layout.addWidget(self.cb_sent_mode, 0, 3)
+        filter_layout.addWidget(QLabel("보기"), 0, 4)
+        filter_layout.addWidget(self.cb_sent_view, 0, 5)
+        filter_layout.addWidget(QLabel("지표"), 0, 6)
+        filter_layout.addWidget(self.cb_sent_metric, 0, 7)
+        filter_layout.addWidget(self.chk_monthly_sample_sent, 0, 8)
+        filter_layout.addWidget(QLabel("문장 분리"), 1, 0)
+        filter_layout.addWidget(self.cb_sentence_split, 1, 1)
+        filter_layout.addWidget(self.btn_run_sentiment, 1, 2)
+        filter_layout.addWidget(QLabel("토픽"), 1, 3)
+        filter_layout.addWidget(self.cb_brand_filter, 1, 4, 1, 2)
+        top_layout.addWidget(filter_row)
+
+        rules_group = QGroupBox("룰 기반 보정")
+        rules_layout = QGridLayout(rules_group)
+        self.chk_rule_master = QCheckBox("룰 기반 보정 사용(마스터)")
+        self.chk_rule_master.setChecked(True)
+        self.chk_rule_neg_scope = QCheckBox("부정어 스코프")
+        self.chk_rule_contrast = QCheckBox("대조 접속어")
+        self.chk_rule_emoticon = QCheckBox("이모티콘+긍정 보정")
+        self.chk_rule_profanity = QCheckBox("비속어+긍정 강화")
+        self.chk_rule_prev_negative = QCheckBox("이전 문장 부정 전파(약)")
+        for checkbox in [
+            self.chk_rule_neg_scope,
+            self.chk_rule_contrast,
+            self.chk_rule_emoticon,
+            self.chk_rule_profanity,
+            self.chk_rule_prev_negative,
+        ]:
+            checkbox.setChecked(True)
+        rules_layout.addWidget(self.chk_rule_master, 0, 0, 1, 2)
+        rules_layout.addWidget(self.chk_rule_neg_scope, 1, 0)
+        rules_layout.addWidget(self.chk_rule_contrast, 1, 1)
+        rules_layout.addWidget(self.chk_rule_emoticon, 1, 2)
+        rules_layout.addWidget(self.chk_rule_profanity, 1, 3)
+        rules_layout.addWidget(self.chk_rule_prev_negative, 1, 4)
+        top_layout.addWidget(rules_group)
 
         layout.addWidget(top)
 
@@ -794,9 +889,21 @@ class TextMiningApp(QMainWindow):
             "topic",
         ])
         self.tbl_sent_records.horizontalHeader().setStretchLastSection(True)
+        self.sent_chart_tabs = QTabWidget()
         self.sent_canvas = ChartCanvas()
+        self.sent_topic_charts_container = QWidget()
+        self.sent_topic_charts_layout = QVBoxLayout(self.sent_topic_charts_container)
+        self.sent_topic_charts_layout.setContentsMargins(8, 8, 8, 8)
+        self.sent_topic_charts_layout.setSpacing(12)
+        self.sent_topic_scroll = QScrollArea()
+        self.sent_topic_scroll.setWidgetResizable(True)
+        self.sent_topic_scroll.setWidget(self.sent_topic_charts_container)
+        self.sent_trend_canvas = ChartCanvas()
+        self.sent_chart_tabs.addTab(self.sent_canvas, "감성 분포")
+        self.sent_chart_tabs.addTab(self.sent_topic_scroll, "사전별 감성 스택")
+        self.sent_chart_tabs.addTab(self.sent_trend_canvas, "감성 추이")
         splitter.addWidget(self.tbl_sent_records)
-        splitter.addWidget(self.sent_canvas)
+        splitter.addWidget(self.sent_chart_tabs)
 
         voc_group = QGroupBox("VoC 요약")
         voc_layout = QVBoxLayout(voc_group)
@@ -877,8 +984,12 @@ class TextMiningApp(QMainWindow):
         unit = unit_combo.currentText()
         if unit == "연도":
             values = sorted({str(val.year) for val in dates})
-        else:
+        elif unit == "월":
             values = sorted({val.strftime("%Y-%m") for val in dates})
+        elif unit == "주":
+            values = sorted({val.to_period("W").start_time.strftime("%Y-%m-%d") for val in dates})
+        else:
+            values = sorted({val.strftime("%Y-%m-%d") for val in dates})
         for value in values:
             value_combo.addItem(value)
         value_combo.blockSignals(False)
@@ -889,9 +1000,68 @@ class TextMiningApp(QMainWindow):
             (self.cb_buzz_period_unit, self.cb_buzz_period_value),
             (self.cb_wc_period_unit, self.cb_wc_period_value),
             (self.cb_network_period_unit, self.cb_network_period_value),
-            (self.cb_sent_period_unit, self.cb_sent_period_value),
         ]:
             self.populate_period_values(unit_combo, value_combo, df)
+        self.populate_sentiment_period_values()
+
+    def populate_sentiment_period_values(self):
+        self.cb_sent_period_value.blockSignals(True)
+        self.cb_sent_period_value.clear()
+        self.cb_sent_period_value.addItem(PERIOD_ALL_LABEL)
+        df = self.df_clean
+        if df is None or df.empty or "date" not in df.columns:
+            self.cb_sent_period_value.blockSignals(False)
+            return
+        dates = df["date"].dropna()
+        if dates.empty:
+            self.cb_sent_period_value.blockSignals(False)
+            return
+        view = self.cb_sent_view.currentText()
+        if view == "월별":
+            values = sorted({val.strftime("%Y-%m") for val in dates})
+        else:
+            values = sorted({str(val.year) for val in dates})
+        for value in values:
+            self.cb_sent_period_value.addItem(value)
+        self.cb_sent_period_value.blockSignals(False)
+
+    def create_monthly_sampling_checkbox(self):
+        checkbox = QCheckBox("월별 랜덤샘플링")
+        checkbox.toggled.connect(self.set_monthly_sampling)
+        self.monthly_sampling_checkboxes.append(checkbox)
+        return checkbox
+
+    def set_monthly_sampling(self, checked: bool):
+        self.monthly_sampling_enabled = checked
+        for checkbox in self.monthly_sampling_checkboxes:
+            if checkbox.isChecked() != checked:
+                checkbox.blockSignals(True)
+                checkbox.setChecked(checked)
+                checkbox.blockSignals(False)
+        self.refresh_token_sample()
+        self.statusBar().showMessage(
+            "월별 랜덤 샘플링 적용" if checked else "월별 랜덤 샘플링 해제"
+        )
+
+    def apply_monthly_sampling(self, df: pd.DataFrame):
+        if df is None or df.empty or not self.monthly_sampling_enabled:
+            return df
+        if "date" not in df.columns:
+            return df
+        working = df.copy()
+        working["_month_bucket"] = working["date"].dt.to_period("M").dt.start_time
+        counts = working["_month_bucket"].value_counts()
+        if counts.empty:
+            return df
+        target = int(counts.min())
+
+        def sample_group(group):
+            if len(group) <= target:
+                return group
+            return group.sample(n=target)
+
+        sampled = working.groupby("_month_bucket", group_keys=False).apply(sample_group)
+        return sampled.drop(columns=["_month_bucket"])
 
     def filter_df_by_period(self, df: pd.DataFrame, unit_combo: QComboBox, value_combo: QComboBox):
         if df is None or df.empty or "date" not in df.columns:
@@ -903,7 +1073,22 @@ class TextMiningApp(QMainWindow):
         dates = df["date"]
         if unit == "연도":
             return df[dates.dt.year.astype(str) == value]
-        return df[dates.dt.strftime("%Y-%m") == value]
+        if unit == "월":
+            return df[dates.dt.strftime("%Y-%m") == value]
+        if unit == "주":
+            return df[dates.dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d") == value]
+        return df[dates.dt.strftime("%Y-%m-%d") == value]
+
+    def filter_sentiment_by_period(self, df: pd.DataFrame):
+        if df is None or df.empty or "date" not in df.columns:
+            return df
+        value = self.cb_sent_period_value.currentText()
+        if value in {PERIOD_ALL_LABEL, "전체"}:
+            return df
+        view = self.cb_sent_view.currentText()
+        if view == "월별":
+            return df[df["date"].dt.strftime("%Y-%m") == value]
+        return df[df["date"].dt.strftime("%Y") == value]
 
     def load_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1159,13 +1344,55 @@ class TextMiningApp(QMainWindow):
                 elif cand2 in self.senti_dict:
                     hit = cand2
                 if hit:
-                    matched.append(hit)
+                    matched.append({"token": hit, "start": idx, "end": idx + n})
                     for pos in range(idx, idx + n):
                         used[pos] = True
                     idx += n
                 else:
                     idx += 1
         return matched
+
+    def apply_negation_scope(self, tokens, matches):
+        adjusted_scores = []
+        negated_tokens = set()
+        for match in matches:
+            token = match["token"]
+            start = match["start"]
+            score = self.senti_dict.get(token, 0)
+            scope_start = max(0, start - 3)
+            scope_tokens = tokens[scope_start:start]
+            if any(scope in NEGATION_TOKENS for scope in scope_tokens):
+                score = -score
+                negated_tokens.add(token)
+            adjusted_scores.append(score)
+        return adjusted_scores, negated_tokens
+
+    def split_contrast_clauses(self, sentence: str):
+        for token in CONTRAST_TOKENS:
+            if token in sentence:
+                before, after = sentence.split(token, 1)
+                return [before.strip(), after.strip()]
+        match = re.search(r"(지만|는데)", sentence)
+        if match:
+            idx = match.start()
+            before = sentence[: idx + len(match.group())]
+            after = sentence[idx + len(match.group()):]
+            return [before.strip(), after.strip()]
+        return [sentence]
+
+    def calculate_sentence_score(self, sentence: str, tokens, matches, apply_neg_scope: bool):
+        matched_tokens = [match["token"] for match in matches]
+        reasons = []
+        if not matches:
+            return 0, matched_tokens, reasons
+        if apply_neg_scope:
+            scores, negated = self.apply_negation_scope(tokens, matches)
+            if negated:
+                reasons.append("부정어 스코프")
+        else:
+            scores = [self.senti_dict.get(match["token"], 0) for match in matches]
+        raw_score = sum(scores)
+        return raw_score, matched_tokens, reasons
 
     def bin_sentiment_score(self, raw_score: float) -> int:
         if raw_score <= -2:
@@ -1189,11 +1416,11 @@ class TextMiningApp(QMainWindow):
 
     def sentiment_bucket_label(self, score: int) -> str:
         return {
-            -2: "부정 -2",
-            -1: "부정 -1",
-            0: "중립 0",
-            1: "긍정 +1",
-            2: "긍정 +2",
+            -2: "매우부정",
+            -1: "부정",
+            0: "중립",
+            1: "긍정",
+            2: "매우긍정",
         }.get(score, str(score))
 
     def match_topic(self, text: str) -> str:
@@ -1263,15 +1490,12 @@ class TextMiningApp(QMainWindow):
     def refresh_token_sample(self):
         if self.df_clean is None:
             return
-        df = self.filter_df_by_period(
-            self.df_clean, self.cb_wc_period_unit, self.cb_wc_period_value
-        )
-        topn = int(self.cb_wc_topn.currentText()) if hasattr(self, "cb_wc_topn") else 50
+        df = self.apply_monthly_sampling(self.df_clean)
         tokens = list(itertools.chain.from_iterable(
             self.tokenize_text(text) for text in df["full_text"]
         ))
         series = pd.Series(tokens)
-        freq = series.value_counts().head(topn)
+        freq = series.value_counts()
         self.tbl_token_sample.setRowCount(len(freq))
         for row_idx, (token, count) in enumerate(freq.items()):
             self.tbl_token_sample.setItem(row_idx, 0, QTableWidgetItem(token))
@@ -1301,6 +1525,53 @@ class TextMiningApp(QMainWindow):
             cleaned.append(token)
         return cleaned
 
+    def parse_custom_terms(self, raw_text: str):
+        if not raw_text:
+            return set()
+        tokens = [token.strip() for token in re.split(r"[,\n]", raw_text) if token.strip()]
+        return set(tokens)
+
+    def build_wordcloud_mask(self, shape: str, size: int = 400):
+        y, x = np.ogrid[:size, :size]
+        center = (size - 1) / 2
+        mask = np.zeros((size, size), dtype=np.uint8)
+        if shape == "circle":
+            radius = size * 0.45
+            shape_mask = (x - center) ** 2 + (y - center) ** 2 <= radius ** 2
+            mask[shape_mask] = 255
+        elif shape == "diamond":
+            radius = size * 0.45
+            shape_mask = np.abs(x - center) + np.abs(y - center) <= radius
+            mask[shape_mask] = 255
+        elif shape == "triangle":
+            shape_mask = y >= (size - x) * 0.8
+            shape_mask &= y >= x * 0.8
+            mask[shape_mask] = 255
+        else:
+            mask[:, :] = 255
+        return mask
+
+    def random_wordcloud_style(self):
+        colormaps = [
+            "viridis",
+            "plasma",
+            "inferno",
+            "magma",
+            "cividis",
+            "cool",
+            "spring",
+            "summer",
+            "autumn",
+            "winter",
+            "Set2",
+            "tab10",
+        ]
+        shapes = ["circle", "diamond", "triangle", "square"]
+        colormap = random.choice(colormaps)
+        shape = random.choice(shapes)
+        mask = self.build_wordcloud_mask(shape)
+        return colormap, mask
+
     def build_buzz(self):
         if self.df_clean is None:
             return
@@ -1316,6 +1587,10 @@ class TextMiningApp(QMainWindow):
         gran = self.cb_granularity.currentText()
         if gran == "월":
             df["bucket"] = df["date"].dt.to_period("M").dt.start_time
+        elif gran == "주":
+            df["bucket"] = df["date"].dt.to_period("W").dt.start_time
+        elif gran == "일":
+            df["bucket"] = df["date"].dt.normalize()
         else:
             df["bucket"] = df["date"].dt.to_period("Y").dt.start_time
 
@@ -1370,6 +1645,7 @@ class TextMiningApp(QMainWindow):
         df = self.filter_df_by_period(
             self.df_clean, self.cb_wc_period_unit, self.cb_wc_period_value
         )
+        df = self.apply_monthly_sampling(df)
         tokens = list(itertools.chain.from_iterable(
             self.tokenize_text(text) for text in df["full_text"]
         ))
@@ -1383,11 +1659,17 @@ class TextMiningApp(QMainWindow):
             self.tbl_wc_topn.setRowCount(0)
             return
         font_path = self.font_path
+        if self.chk_wc_random_style.isChecked():
+            colormap, mask = self.random_wordcloud_style()
+        else:
+            colormap, mask = "Blues", None
         wordcloud = WordCloud(
             width=800,
             height=500,
             background_color="white",
             font_path=str(font_path) if font_path else None,
+            colormap=colormap,
+            mask=mask,
         )
         wc_img = wordcloud.generate_from_frequencies(freq.head(topn).to_dict())
         wc_path = os.path.join(os.getcwd(), "wordcloud.png")
@@ -1425,11 +1707,14 @@ class TextMiningApp(QMainWindow):
         df = self.filter_df_by_period(
             self.df_clean, self.cb_network_period_unit, self.cb_network_period_value
         )
+        df = self.apply_monthly_sampling(df)
         if df.empty:
             self.statusBar().showMessage("선택한 기간에 네트워크 데이터가 없습니다.")
             self.graph_full = None
             self.graph_view = None
             self.network_pos = None
+            self.network_seed_nodes = []
+            self.network_level_map = {}
             self.draw_network(nx.Graph())
             self.populate_network_tables(pd.DataFrame(), pd.DataFrame())
             return
@@ -1440,18 +1725,19 @@ class TextMiningApp(QMainWindow):
             scope = self.cb_cooc_scope.currentText()
             weight_mode = self.cb_weight_mode.currentText()
 
+        self.network_stopwords = self.parse_custom_terms(self.le_network_stopwords.text())
         token_lists = []
         if scope == "문서(로우)":
             for text in df["full_text"]:
                 tokens = [normalize_term(token) for token in self.tokenize_text(text)]
-                tokens = [token for token in tokens if token]
+                tokens = [token for token in tokens if token and token not in self.network_stopwords]
                 if tokens:
                     token_lists.append(tokens)
         else:
             for text in df["full_text"]:
                 for sentence in split_sentences(text):
                     tokens = [normalize_term(token) for token in self.tokenize_text(sentence)]
-                    tokens = [token for token in tokens if token]
+                    tokens = [token for token in tokens if token and token not in self.network_stopwords]
                     if tokens:
                         token_lists.append(tokens)
 
@@ -1514,6 +1800,8 @@ class TextMiningApp(QMainWindow):
         self.graph_full = graph
         self.graph_view = graph.copy()
         self.network_pos = None
+        self.network_seed_nodes = []
+        self.network_level_map = {}
         self.nodes_df = pd.DataFrame(
             [(node, graph.degree(node)) for node in graph.nodes], columns=["node", "degree"]
         )
@@ -1569,6 +1857,8 @@ class TextMiningApp(QMainWindow):
         subgraph = self.graph_full.subgraph(nodes).copy()
         self.graph_view = subgraph
         self.network_pos = None
+        self.network_seed_nodes = seeds
+        self.network_level_map = self.compute_network_levels(subgraph, seeds)
         self.nodes_view_df = pd.DataFrame(
             [(node, subgraph.degree(node)) for node in subgraph.nodes], columns=["node", "degree"]
         )
@@ -1580,11 +1870,33 @@ class TextMiningApp(QMainWindow):
         self.populate_network_tables(self.edges_view_df, self.nodes_view_df)
         self.chart_images["network"] = self.save_chart(self.network_canvas, "network")
 
+    def compute_network_levels(self, graph, seeds):
+        if not seeds:
+            return {}
+        levels = {}
+        for node in graph.nodes:
+            distances = []
+            for seed in seeds:
+                if seed in graph and nx.has_path(graph, seed, node):
+                    distances.append(nx.shortest_path_length(graph, seed, node))
+            if not distances:
+                continue
+            distance = min(distances)
+            if distance <= 0:
+                levels[node] = 1
+            elif distance == 1:
+                levels[node] = 2
+            else:
+                levels[node] = 3
+        return levels
+
     def reset_network_view(self):
         if self.graph_full is None:
             return
         self.graph_view = self.graph_full.copy()
         self.network_pos = None
+        self.network_seed_nodes = []
+        self.network_level_map = {}
         self.nodes_view_df = self.nodes_df.copy()
         self.edges_view_df = self.edges_df.copy()
         self.draw_network(self.graph_view)
@@ -1608,9 +1920,20 @@ class TextMiningApp(QMainWindow):
         degrees = [graph.degree(node) for node in graph.nodes]
         max_degree = max(degrees) if degrees else 1
         sizes = [200 + 1200 * (deg / max_degree) for deg in degrees]
-        norm = colors.Normalize(vmin=0, vmax=max_degree or 1)
-        cmap = cm.get_cmap("Set2")
-        node_colors = [cmap(norm(deg)) for deg in degrees]
+        if self.network_level_map:
+            level_palette = {
+                1: "#ff6fae",
+                2: "#4a4a4a",
+                3: "#9e9e9e",
+            }
+            node_colors = [
+                level_palette.get(self.network_level_map.get(node, 3), "#9e9e9e")
+                for node in graph.nodes
+            ]
+        else:
+            norm = colors.Normalize(vmin=0, vmax=max_degree or 1)
+            cmap = cm.get_cmap("Set2")
+            node_colors = [cmap(norm(deg)) for deg in degrees]
         edge_weights = [data.get("weight", 1.0) for _, _, data in graph.edges(data=True)]
         max_weight = max(edge_weights) if edge_weights else 1.0
         edge_widths = [0.6 + 3.0 * (weight / max_weight) for weight in edge_weights]
@@ -1677,17 +2000,59 @@ class TextMiningApp(QMainWindow):
             return
         self.update_sentiment_lexicon()
 
+        df = self.apply_monthly_sampling(self.df_clean)
         records = []
-        for _, row in self.df_clean.iterrows():
+        for _, row in df.iterrows():
             text = row.get("full_text", "")
+            prev_final_score = None
             for sentence in self.split_sentiment_sentences(text):
-                tokens = self.tokenize_text(sentence)
-                matched = self.match_sentiment_tokens(tokens)
-                scores = [self.senti_dict.get(token, 0) for token in matched if token]
-                raw_score = sum(scores) if scores else 0
+                apply_rules = self.chk_rule_master.isChecked()
+                use_neg_scope = apply_rules and self.chk_rule_neg_scope.isChecked()
+                use_contrast = apply_rules and self.chk_rule_contrast.isChecked()
+                use_emoticon = apply_rules and self.chk_rule_emoticon.isChecked()
+                use_profanity = apply_rules and self.chk_rule_profanity.isChecked()
+                use_prev_negative = apply_rules and self.chk_rule_prev_negative.isChecked()
+
+                if use_contrast:
+                    clauses = self.split_contrast_clauses(sentence)
+                else:
+                    clauses = [sentence]
+
+                clause_scores = []
+                matched_tokens = []
+                reasons = []
+                for idx, clause in enumerate(clauses):
+                    tokens = self.tokenize_text(clause)
+                    matches = self.match_sentiment_tokens(tokens)
+                    clause_score, clause_matched, clause_reasons = self.calculate_sentence_score(
+                        clause, tokens, matches, use_neg_scope
+                    )
+                    weight = 1.0 if idx == 0 else 1.5
+                    if len(clauses) > 1 and idx > 0:
+                        reasons.append("대조 접속어")
+                    clause_scores.append(clause_score * weight)
+                    matched_tokens.extend(clause_matched)
+                    reasons.extend(clause_reasons)
+
+                raw_score = sum(clause_scores) if clause_scores else 0
+
+                if use_emoticon and EMOTICON_PATTERN.search(sentence) and POSITIVE_PATTERN.search(sentence):
+                    if raw_score <= 0:
+                        raw_score = max(raw_score + 1, 1)
+                        reasons.append("이모티콘+긍정 보정")
+                if use_profanity and PROFANITY_PATTERN.search(sentence) and POSITIVE_PATTERN.search(sentence):
+                    raw_score = max(raw_score + 1, 1)
+                    reasons.append("비속어+긍정 강화")
+
+                if use_prev_negative and prev_final_score is not None:
+                    if prev_final_score <= -1 and 0 <= raw_score <= 1:
+                        raw_score -= 1
+                        reasons.append("이전 문장 부정 전파")
+
                 score = self.bin_sentiment_score(raw_score)
                 label = self.sentiment_score_label(score)
                 topic = self.match_topic(sentence)
+                adjust_reason = "; ".join(dict.fromkeys(reasons))
                 records.append(
                     {
                         "date": row.get("date"),
@@ -1696,9 +2061,12 @@ class TextMiningApp(QMainWindow):
                         "score": score,
                         "label": label,
                         "topic": topic,
-                        "matched_words": ", ".join(matched),
+                        "matched_words": ", ".join(matched_tokens),
+                        "adjusted_score": score,
+                        "adjust_reason": adjust_reason,
                     }
                 )
+                prev_final_score = score
 
         self.sentiment_records_df = pd.DataFrame(records)
         self.update_sentiment_view()
@@ -1706,13 +2074,14 @@ class TextMiningApp(QMainWindow):
     def update_sentiment_view(self):
         if self.sentiment_records_df is None or self.sentiment_records_df.empty:
             return
-        df = self.filter_df_by_period(
-            self.sentiment_records_df.copy(), self.cb_sent_period_unit, self.cb_sent_period_value
-        )
+        df = self.filter_sentiment_by_period(self.sentiment_records_df.copy())
         if df.empty:
             self.tbl_sent_records.setRowCount(0)
             self.sent_canvas.ax.clear()
             self.sent_canvas.draw()
+            self.sent_trend_canvas.ax.clear()
+            self.sent_trend_canvas.draw()
+            self.clear_sentiment_topic_charts()
             self.txt_voc.clear()
             self.statusBar().showMessage("선택한 기간에 감성 데이터가 없습니다.")
             return
@@ -1755,6 +2124,8 @@ class TextMiningApp(QMainWindow):
             chart_summary = df.groupby(["score", "label"]).size().reset_index(name="count")
 
         self.plot_sentiment_chart(chart_summary)
+        self.plot_sentiment_topic_stacks(df)
+        self.plot_sentiment_trend(df)
         self.update_voc_summary(df)
 
     def populate_sentiment_table(self, df):
@@ -1820,11 +2191,19 @@ class TextMiningApp(QMainWindow):
             if not positives.empty:
                 voc_lines.append("긍정")
                 for _, row in positives.iterrows():
-                    voc_lines.append(f"- {row['sentence']} ({row.get('matched_words', '')})")
+                    reason = row.get("adjust_reason", "")
+                    extra = f"{row.get('matched_words', '')}"
+                    if reason:
+                        extra = f"{extra} | {reason}" if extra else reason
+                    voc_lines.append(f"- {row['sentence']} ({extra})")
             if not negatives.empty:
                 voc_lines.append("부정")
                 for _, row in negatives.iterrows():
-                    voc_lines.append(f"- {row['sentence']} ({row.get('matched_words', '')})")
+                    reason = row.get("adjust_reason", "")
+                    extra = f"{row.get('matched_words', '')}"
+                    if reason:
+                        extra = f"{extra} | {reason}" if extra else reason
+                    voc_lines.append(f"- {row['sentence']} ({extra})")
             voc_lines.append("")
         self.txt_voc.setPlainText("\n".join(voc_lines))
 
@@ -1854,8 +2233,115 @@ class TextMiningApp(QMainWindow):
                 ylabel = "%"
             else:
                 ylabel = "count"
-            self.sent_canvas.plot_bar(labels, values, "감성 분포", ylabel)
+            self.sent_canvas.ax.clear()
+            bar_colors = [SENTIMENT_COLORS[score] for score in score_order]
+            if labels:
+                self.sent_canvas.ax.bar(labels, values, color=bar_colors)
+                self.sent_canvas.ax.set_xticks(range(len(labels)))
+                self.sent_canvas.ax.set_xticklabels(labels, rotation=45, ha="right")
+            self.sent_canvas.ax.set_title("감성 분포")
+            self.sent_canvas.ax.set_ylabel(ylabel)
+            self.sent_canvas.ax.grid(axis="y", alpha=0.3)
+            self.sent_canvas.figure.tight_layout()
+            self.sent_canvas.draw()
         self.chart_images["sentiment"] = self.save_chart(self.sent_canvas, "sentiment")
+
+    def clear_sentiment_topic_charts(self):
+        for idx in reversed(range(self.sent_topic_charts_layout.count())):
+            item = self.sent_topic_charts_layout.takeAt(idx)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
+
+    def plot_sentiment_topic_stacks(self, df):
+        self.clear_sentiment_topic_charts()
+        if df is None or df.empty:
+            return
+        score_order = [-2, -1, 0, 1, 2]
+        labels = [self.sentiment_bucket_label(score) for score in score_order]
+        topics = sorted(df["topic"].dropna().unique())
+        if not topics:
+            return
+        for topic in topics:
+            sub = df[df["topic"] == topic]
+            counts = (
+                sub.groupby("score")
+                .size()
+                .reindex(score_order, fill_value=0)
+                .astype(float)
+            )
+            total = counts.sum() or 1.0
+            percents = [round(value / total * 100, 2) for value in counts.tolist()]
+            canvas = ChartCanvas()
+            canvas.ax.clear()
+            x_positions = [0]
+            bottoms = [0.0]
+            for score, label, value in zip(score_order, labels, percents):
+                values = [value]
+                color = SENTIMENT_COLORS.get(score, "#999999")
+                bars = canvas.ax.bar(x_positions, values, bottom=bottoms, label=label, color=color)
+                for bar, bottom, value in zip(bars, bottoms, values):
+                    if value <= 0:
+                        continue
+                    canvas.ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bottom + value / 2,
+                        f"{value:.1f}%",
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color="white" if value >= 15 else "#333333",
+                    )
+                bottoms = [b + v for b, v in zip(bottoms, values)]
+            canvas.ax.set_xticks(x_positions)
+            canvas.ax.set_xticklabels([topic])
+            canvas.ax.set_ylim(0, 100)
+            canvas.ax.set_title(f"{topic} 감성 비율")
+            canvas.ax.set_ylabel("%")
+            canvas.ax.legend(loc="upper right")
+            canvas.figure.tight_layout()
+            canvas.draw()
+            self.sent_topic_charts_layout.addWidget(canvas)
+
+    def plot_sentiment_trend(self, df):
+        if df is None or df.empty:
+            self.sent_trend_canvas.ax.clear()
+            self.sent_trend_canvas.draw()
+            return
+        view = self.cb_sent_view.currentText()
+        if view == "월별":
+            df["bucket"] = df["date"].dt.strftime("%Y-%m")
+        else:
+            df["bucket"] = df["date"].dt.strftime("%Y")
+        score_order = [-2, -1, 0, 1, 2]
+        summary = (
+            df.groupby(["bucket", "score"])
+            .size()
+            .reset_index(name="count")
+        )
+        pivot = summary.pivot_table(index="bucket", columns="score", values="count", fill_value=0)
+        pivot = pivot.reindex(columns=score_order, fill_value=0)
+        pivot = pivot.sort_index()
+        if self.cb_sent_metric.currentText() == "%":
+            pivot = pivot.div(pivot.sum(axis=1).replace(0, 1), axis=0) * 100
+            ylabel = "%"
+        else:
+            ylabel = "count"
+        labels = list(pivot.index)
+        series = []
+        colors_map = {}
+        for score in score_order:
+            label = self.sentiment_bucket_label(score)
+            series.append((label, pivot[score].tolist()))
+            colors_map[label] = SENTIMENT_COLORS.get(score)
+        self.sent_trend_canvas.plot_multi_line(
+            labels,
+            series,
+            "감성 추이",
+            ylabel,
+            colors_map=colors_map,
+        )
+        self.chart_images["sentiment_trend"] = self.save_chart(self.sent_trend_canvas, "sentiment_trend")
 
     def update_network_recommendation(self, doc_count: int, token_count: int):
         if doc_count <= 100:
