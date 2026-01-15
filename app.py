@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+from typing import List
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QSpinBox,
@@ -44,11 +46,22 @@ from wordcloud import WordCloud
 matplotlib.use("Qt5Agg")
 
 KNU_DICT_URL = "https://raw.githubusercontent.com/park1200656/KnuSentiLex/master/data/SentiWord_info.json"
+DEFAULT_RESOURCE_DIR = Path(r"C:\Users\70089004\text_file")
+DEFAULT_FONT_NAME = "Pretendard-Medium.otf"
+DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
 
 
 def resource_path(rel_path: str) -> str:
     base = getattr(sys, "_MEIPASS", str(Path(__file__).resolve().parent))
     return str(Path(base) / rel_path)
+
+
+def candidate_resource_paths(filename: str) -> List[Path]:
+    return [
+        Path(resource_path(filename)),
+        DEFAULT_RESOURCE_DIR / filename,
+        Path(__file__).resolve().parent / filename,
+    ]
 
 
 def parse_sentiment_entries(entries):
@@ -73,10 +86,27 @@ def parse_sentiment_entries(entries):
     return senti_dict
 
 
-def load_knu_dictionary():
-    local_path = resource_path("SentiWord_Dict.txt")
-    if os.path.exists(local_path):
-        with open(local_path, "r", encoding="utf-8") as file:
+def load_knu_dictionary(parent=None):
+    for path in candidate_resource_paths(DEFAULT_SENTI_NAME):
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as file:
+                content = file.read()
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                data = content.splitlines()
+            senti_dict = parse_sentiment_entries(data)
+            if senti_dict:
+                return senti_dict
+
+    selected_path, _ = QFileDialog.getOpenFileName(
+        parent,
+        "감성사전 파일 선택",
+        str(DEFAULT_RESOURCE_DIR),
+        "Dictionary Files (*.txt *.json);;All Files (*)",
+    )
+    if selected_path:
+        with open(selected_path, "r", encoding="utf-8") as file:
             content = file.read()
         try:
             data = json.loads(content)
@@ -86,10 +116,20 @@ def load_knu_dictionary():
         if senti_dict:
             return senti_dict
 
-    response = requests.get(KNU_DICT_URL, timeout=10)
-    response.raise_for_status()
-    data = response.json()
-    return parse_sentiment_entries(data)
+    try:
+        response = requests.get(KNU_DICT_URL, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return parse_sentiment_entries(data)
+    except requests.RequestException as exc:
+        QMessageBox.warning(
+            parent,
+            "Dictionary Error",
+            "온라인 감성사전 로드 실패.\n"
+            "내장/로컬 사전을 확인하거나 파일 선택을 이용해주세요.\n"
+            f"{exc}",
+        )
+    return {}
 
 
 def split_sentences(text: str):
@@ -115,6 +155,18 @@ def parse_brand_dictionary(raw_text: str):
 
 def normalize_column_name(name: str):
     return re.sub(r"[\s_]", "", name.lower())
+
+
+def safe_strftime(value):
+    if isinstance(value, (datetime, pd.Timestamp)) and pd.notnull(value):
+        return value.strftime("%Y-%m-%d")
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+    except (TypeError, ValueError):
+        parsed = pd.NaT
+    if isinstance(parsed, (pd.Timestamp, datetime)) and pd.notnull(parsed):
+        return parsed.strftime("%Y-%m-%d")
+    return ""
 
 
 class ChartCanvas(FigureCanvas):
@@ -147,6 +199,25 @@ class ChartCanvas(FigureCanvas):
         self.figure.tight_layout()
         self.draw()
 
+    def plot_multi_bar(self, labels, series, title, ylabel):
+        self.ax.clear()
+        if labels and series:
+            total = len(series)
+            width = 0.8 / total
+            x_positions = list(range(len(labels)))
+            for idx, (name, values) in enumerate(series):
+                offset = (idx - (total - 1) / 2) * width
+                positions = [x + offset for x in x_positions]
+                self.ax.bar(positions, values, width=width, label=name)
+            self.ax.set_xticks(x_positions)
+            self.ax.set_xticklabels(labels, rotation=45, ha="right")
+            self.ax.legend()
+        self.ax.set_title(title)
+        self.ax.set_ylabel(ylabel)
+        self.ax.grid(axis="y", alpha=0.3)
+        self.figure.tight_layout()
+        self.draw()
+
 
 class TextMiningApp(QMainWindow):
     def __init__(self):
@@ -164,6 +235,8 @@ class TextMiningApp(QMainWindow):
         self.wc_image_path = None
         self.graph_full = None
         self.graph_view = None
+        self.network_pos = None
+        self.network_drag_node = None
         self.nodes_df = None
         self.edges_df = None
         self.nodes_view_df = None
@@ -191,7 +264,7 @@ class TextMiningApp(QMainWindow):
         self._build_tab_export()
 
         self.footer_label = QLabel(
-            'made by jihee.cho (<a href="https://github.com/jay-lay-down">https://github.com/jay-lay-down</a>)'
+            'Made by jihee.cho (<a href="https://github.com/jay-lay-down">https://github.com/jay-lay-down</a>)'
         )
         self.footer_label.setOpenExternalLinks(True)
         self.footer_label.setAlignment(Qt.AlignCenter)
@@ -426,6 +499,8 @@ class TextMiningApp(QMainWindow):
         self.cb_weight_mode = QComboBox()
         self.cb_weight_mode.addItems(["count", "PMI"])
         self.cb_weight_mode.currentIndexChanged.connect(self.handle_pmi_guard)
+        self.chk_drag_mode = QCheckBox("노드 위치 편집")
+        self.chk_drag_mode.toggled.connect(self.redraw_network)
         self.lbl_advanced_hint = QLabel(
             "PMI는 희귀 단어쌍을 과대평가할 수 있어 min_node_count ≥ 10, "
             "min_edge_weight ≥ 5를 권장합니다. (데이터가 작을수록 필터를 높이세요)"
@@ -443,7 +518,8 @@ class TextMiningApp(QMainWindow):
         top_layout.addWidget(self.btn_reset_view, 1, 4)
         top_layout.addWidget(self.cb_cooc_scope, 2, 0, 1, 2)
         top_layout.addWidget(self.cb_weight_mode, 2, 2, 1, 2)
-        top_layout.addWidget(self.lbl_advanced_hint, 2, 4)
+        top_layout.addWidget(self.chk_drag_mode, 2, 4)
+        top_layout.addWidget(self.lbl_advanced_hint, 2, 5)
 
         splitter.addWidget(top)
 
@@ -459,6 +535,9 @@ class TextMiningApp(QMainWindow):
         bottom = QSplitter(Qt.Horizontal)
         bottom.setSizes([700, 500])
         self.network_canvas = ChartCanvas()
+        self.network_canvas.mpl_connect("button_press_event", self.on_network_press)
+        self.network_canvas.mpl_connect("button_release_event", self.on_network_release)
+        self.network_canvas.mpl_connect("motion_notify_event", self.on_network_motion)
         self.network_tabs = QTabWidget()
         self.tbl_edges = QTableWidget()
         self.tbl_edges.setColumnCount(3)
@@ -704,9 +783,7 @@ class TextMiningApp(QMainWindow):
             self.tbl_preview.setItem(row_idx, 2, QTableWidgetItem(str(row.get("full_text", ""))))
 
     def format_date(self, value):
-        if isinstance(value, (datetime, pd.Timestamp)) and pd.notnull(value):
-            return value.strftime("%Y-%m-%d")
-        return ""
+        return safe_strftime(value)
 
     def apply_brand_dict(self):
         self.brand_map = parse_brand_dictionary(self.txt_brand_dict.toPlainText())
@@ -844,8 +921,16 @@ class TextMiningApp(QMainWindow):
         self.buzz_df = summary
 
         labels = [self.format_date(val) for val in summary["bucket"]]
-        values = summary["count"].tolist()
-        self.buzz_canvas.plot_line(labels, values, "버즈량", "count")
+        if self.chk_split_by_page_type.isChecked():
+            pivot = summary.pivot_table(
+                index="bucket", columns="page_type", values="count", fill_value=0
+            )
+            labels = [self.format_date(val) for val in pivot.index]
+            series = [(str(col), pivot[col].tolist()) for col in pivot.columns]
+            self.buzz_canvas.plot_multi_bar(labels, series, "버즈량", "count")
+        else:
+            values = summary["count"].tolist()
+            self.buzz_canvas.plot_bar(labels, values, "버즈량", "count")
         self.chart_images["buzz"] = self.save_chart(self.buzz_canvas, "buzz")
 
         self.tbl_buzz.setRowCount(len(summary))
@@ -972,6 +1057,7 @@ class TextMiningApp(QMainWindow):
 
         self.graph_full = graph
         self.graph_view = graph.copy()
+        self.network_pos = None
         self.nodes_df = pd.DataFrame(
             [(node, graph.degree(node)) for node in graph.nodes], columns=["node", "degree"]
         )
@@ -1015,6 +1101,7 @@ class TextMiningApp(QMainWindow):
             nodes.update(nx.single_source_shortest_path_length(self.graph_full, seed, cutoff=hop).keys())
         subgraph = self.graph_full.subgraph(nodes).copy()
         self.graph_view = subgraph
+        self.network_pos = None
         self.nodes_view_df = pd.DataFrame(
             [(node, subgraph.degree(node)) for node in subgraph.nodes], columns=["node", "degree"]
         )
@@ -1030,24 +1117,64 @@ class TextMiningApp(QMainWindow):
         if self.graph_full is None:
             return
         self.graph_view = self.graph_full.copy()
+        self.network_pos = None
         self.nodes_view_df = self.nodes_df.copy()
         self.edges_view_df = self.edges_df.copy()
         self.draw_network(self.graph_view)
         self.populate_network_tables(self.edges_view_df, self.nodes_view_df)
         self.chart_images["network"] = self.save_chart(self.network_canvas, "network")
 
+    def redraw_network(self):
+        if self.graph_view is None:
+            return
+        self.draw_network(self.graph_view)
+
     def draw_network(self, graph):
         self.network_canvas.ax.clear()
         if graph is None or graph.number_of_nodes() == 0:
             self.network_canvas.draw()
             return
-        pos = nx.spring_layout(graph, k=0.6, seed=42)
+        if self.network_pos is None or set(self.network_pos.keys()) != set(graph.nodes):
+            self.network_pos = nx.spring_layout(graph, k=0.6, seed=42)
+        pos = self.network_pos
         nx.draw_networkx_nodes(graph, pos, ax=self.network_canvas.ax, node_size=200, node_color="#6baed6")
         nx.draw_networkx_edges(graph, pos, ax=self.network_canvas.ax, width=1.0, edge_color="#999999")
         nx.draw_networkx_labels(graph, pos, ax=self.network_canvas.ax, font_size=8)
         self.network_canvas.ax.set_title("네트워크")
         self.network_canvas.ax.axis("off")
         self.network_canvas.draw()
+
+    def on_network_press(self, event):
+        if not self.chk_drag_mode.isChecked():
+            return
+        if self.graph_view is None or event.inaxes != self.network_canvas.ax:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        closest = None
+        closest_dist = None
+        for node, (x_pos, y_pos) in self.network_pos.items():
+            dist = (x_pos - event.xdata) ** 2 + (y_pos - event.ydata) ** 2
+            if closest_dist is None or dist < closest_dist:
+                closest_dist = dist
+                closest = node
+        if closest_dist is not None and closest_dist < 0.02:
+            self.network_drag_node = closest
+
+    def on_network_motion(self, event):
+        if not self.chk_drag_mode.isChecked():
+            return
+        if self.network_drag_node is None or event.inaxes != self.network_canvas.ax:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        self.network_pos[self.network_drag_node] = (event.xdata, event.ydata)
+        self.draw_network(self.graph_view)
+
+    def on_network_release(self, event):
+        if not self.chk_drag_mode.isChecked():
+            return
+        self.network_drag_node = None
 
     def populate_network_tables(self, edges_df, nodes_df):
         self.tbl_edges.setRowCount(len(edges_df))
@@ -1065,7 +1192,7 @@ class TextMiningApp(QMainWindow):
         if self.df_clean is None:
             return
         if self.senti_dict is None:
-            self.senti_dict = load_knu_dictionary()
+            self.senti_dict = load_knu_dictionary(self)
 
         records = []
         for _, row in self.df_clean.iterrows():
@@ -1218,13 +1345,14 @@ class TextMiningApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
 
-    font_path = resource_path("Pretendard-Medium.otf")
-    if os.path.exists(font_path):
-        font_id = QFontDatabase.addApplicationFont(font_path)
-        if font_id != -1:
-            families = QFontDatabase.applicationFontFamilies(font_id)
-            if families:
-                app.setFont(QFont(families[0], 10))
+    for font_path in candidate_resource_paths(DEFAULT_FONT_NAME):
+        if font_path.exists():
+            font_id = QFontDatabase.addApplicationFont(str(font_path))
+            if font_id != -1:
+                families = QFontDatabase.applicationFontFamilies(font_id)
+                if families:
+                    app.setFont(QFont(families[0], 10))
+                    break
 
     window = TextMiningApp()
     window.show()
