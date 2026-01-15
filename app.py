@@ -53,6 +53,7 @@ DEFAULT_RESOURCE_DIR = Path(r"C:\Users\70089004\text_file")
 DEFAULT_FONT_NAME = "Pretendard-Medium.otf"
 DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
 DEFAULT_NETWORK_FONT_NAME = "malgun.ttf"
+PERIOD_ALL_LABEL = "전체 기간"
 FALLBACK_FONT_NAMES = [
     "Pretendard",
     "Malgun Gothic",
@@ -567,12 +568,17 @@ class TextMiningApp(QMainWindow):
         self.cb_wc_period_unit.addItems(["연도", "월"])
         self.cb_wc_period_value = QComboBox()
         self.cb_wc_period_unit.currentIndexChanged.connect(
-            lambda: self.populate_period_values(
-                self.cb_wc_period_unit, self.cb_wc_period_value, self.df_clean
+            lambda: (
+                self.populate_period_values(
+                    self.cb_wc_period_unit, self.cb_wc_period_value, self.df_clean
+                ),
+                self.refresh_token_sample(),
             )
         )
+        self.cb_wc_period_value.currentIndexChanged.connect(self.refresh_token_sample)
         self.cb_wc_topn = QComboBox()
         self.cb_wc_topn.addItems(["30", "50", "100", "200", "500", "1000", "2000"])
+        self.cb_wc_topn.currentIndexChanged.connect(self.refresh_token_sample)
         self.btn_build_wc = QPushButton("워드클라우드 생성")
         self.btn_build_wc.clicked.connect(self.build_wordcloud)
         self.lbl_wc_count = QLabel("토큰 0 / 고유 0")
@@ -860,7 +866,7 @@ class TextMiningApp(QMainWindow):
     def populate_period_values(self, unit_combo: QComboBox, value_combo: QComboBox, df: pd.DataFrame | None):
         value_combo.blockSignals(True)
         value_combo.clear()
-        value_combo.addItem("전체")
+        value_combo.addItem(PERIOD_ALL_LABEL)
         if df is None or df.empty or "date" not in df.columns:
             value_combo.blockSignals(False)
             return
@@ -892,7 +898,7 @@ class TextMiningApp(QMainWindow):
             return df
         unit = unit_combo.currentText()
         value = value_combo.currentText()
-        if value == "전체":
+        if value in {PERIOD_ALL_LABEL, "전체"}:
             return df
         dates = df["date"]
         if unit == "연도":
@@ -1257,11 +1263,15 @@ class TextMiningApp(QMainWindow):
     def refresh_token_sample(self):
         if self.df_clean is None:
             return
+        df = self.filter_df_by_period(
+            self.df_clean, self.cb_wc_period_unit, self.cb_wc_period_value
+        )
+        topn = int(self.cb_wc_topn.currentText()) if hasattr(self, "cb_wc_topn") else 50
         tokens = list(itertools.chain.from_iterable(
-            self.tokenize_text(text) for text in self.df_clean["full_text"].head(100)
+            self.tokenize_text(text) for text in df["full_text"]
         ))
         series = pd.Series(tokens)
-        freq = series.value_counts().head(50)
+        freq = series.value_counts().head(topn)
         self.tbl_token_sample.setRowCount(len(freq))
         for row_idx, (token, count) in enumerate(freq.items()):
             self.tbl_token_sample.setItem(row_idx, 0, QTableWidgetItem(token))
