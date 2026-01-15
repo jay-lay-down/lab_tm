@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+from typing import List
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QSpinBox,
@@ -44,11 +46,22 @@ from wordcloud import WordCloud
 matplotlib.use("Qt5Agg")
 
 KNU_DICT_URL = "https://raw.githubusercontent.com/park1200656/KnuSentiLex/master/data/SentiWord_info.json"
+DEFAULT_RESOURCE_DIR = Path(r"C:\Users\70089004\text_file")
+DEFAULT_FONT_NAME = "Pretendard-Medium.otf"
+DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
 
 
 def resource_path(rel_path: str) -> str:
     base = getattr(sys, "_MEIPASS", str(Path(__file__).resolve().parent))
     return str(Path(base) / rel_path)
+
+
+def candidate_resource_paths(filename: str) -> List[Path]:
+    return [
+        Path(resource_path(filename)),
+        DEFAULT_RESOURCE_DIR / filename,
+        Path(__file__).resolve().parent / filename,
+    ]
 
 
 def parse_sentiment_entries(entries):
@@ -73,10 +86,27 @@ def parse_sentiment_entries(entries):
     return senti_dict
 
 
-def load_knu_dictionary():
-    local_path = resource_path("SentiWord_Dict.txt")
-    if os.path.exists(local_path):
-        with open(local_path, "r", encoding="utf-8") as file:
+def load_knu_dictionary(parent=None):
+    for path in candidate_resource_paths(DEFAULT_SENTI_NAME):
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as file:
+                content = file.read()
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                data = content.splitlines()
+            senti_dict = parse_sentiment_entries(data)
+            if senti_dict:
+                return senti_dict
+
+    selected_path, _ = QFileDialog.getOpenFileName(
+        parent,
+        "감성사전 파일 선택",
+        str(DEFAULT_RESOURCE_DIR),
+        "Dictionary Files (*.txt *.json);;All Files (*)",
+    )
+    if selected_path:
+        with open(selected_path, "r", encoding="utf-8") as file:
             content = file.read()
         try:
             data = json.loads(content)
@@ -86,10 +116,20 @@ def load_knu_dictionary():
         if senti_dict:
             return senti_dict
 
-    response = requests.get(KNU_DICT_URL, timeout=10)
-    response.raise_for_status()
-    data = response.json()
-    return parse_sentiment_entries(data)
+    try:
+        response = requests.get(KNU_DICT_URL, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return parse_sentiment_entries(data)
+    except requests.RequestException as exc:
+        QMessageBox.warning(
+            parent,
+            "Dictionary Error",
+            "온라인 감성사전 로드 실패.\n"
+            "내장/로컬 사전을 확인하거나 파일 선택을 이용해주세요.\n"
+            f"{exc}",
+        )
+    return {}
 
 
 def split_sentences(text: str):
@@ -191,7 +231,7 @@ class TextMiningApp(QMainWindow):
         self._build_tab_export()
 
         self.footer_label = QLabel(
-            'made by jihee.cho (<a href="https://github.com/jay-lay-down">https://github.com/jay-lay-down</a>)'
+            'Made by jihee.cho (<a href="https://github.com/jay-lay-down">https://github.com/jay-lay-down</a>)'
         )
         self.footer_label.setOpenExternalLinks(True)
         self.footer_label.setAlignment(Qt.AlignCenter)
@@ -1065,7 +1105,7 @@ class TextMiningApp(QMainWindow):
         if self.df_clean is None:
             return
         if self.senti_dict is None:
-            self.senti_dict = load_knu_dictionary()
+            self.senti_dict = load_knu_dictionary(self)
 
         records = []
         for _, row in self.df_clean.iterrows():
@@ -1218,13 +1258,14 @@ class TextMiningApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
 
-    font_path = resource_path("Pretendard-Medium.otf")
-    if os.path.exists(font_path):
-        font_id = QFontDatabase.addApplicationFont(font_path)
-        if font_id != -1:
-            families = QFontDatabase.applicationFontFamilies(font_id)
-            if families:
-                app.setFont(QFont(families[0], 10))
+    for font_path in candidate_resource_paths(DEFAULT_FONT_NAME):
+        if font_path.exists():
+            font_id = QFontDatabase.addApplicationFont(str(font_path))
+            if font_id != -1:
+                families = QFontDatabase.applicationFontFamilies(font_id)
+                if families:
+                    app.setFont(QFont(families[0], 10))
+                    break
 
     window = TextMiningApp()
     window.show()
