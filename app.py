@@ -326,13 +326,22 @@ class ChartCanvas(FigureCanvas):
                 color="white" if bar.get_height() > 0 else "#333333",
             )
 
-    def plot_bar(self, labels, values, title, ylabel, count_values=None, note_text=""):
+    def plot_bar(
+        self,
+        labels,
+        values,
+        title,
+        ylabel,
+        count_values=None,
+        note_text="",
+        show_labels=True,
+    ):
         self.ax.clear()
         if labels:
             bars = self.ax.bar(labels, values, color="#4b77be")
             self.ax.set_xticks(range(len(labels)))
             self.ax.set_xticklabels(labels, rotation=45, ha="right")
-            if count_values is not None:
+            if count_values is not None and show_labels:
                 total = sum(count_values) or 1
                 percents = [(count / total) * 100 for count in count_values]
                 self.annotate_bars(bars, count_values, percents)
@@ -370,7 +379,16 @@ class ChartCanvas(FigureCanvas):
         self.figure.tight_layout()
         self.draw()
 
-    def plot_multi_bar(self, labels, series, title, ylabel, count_series=None, note_text=""):
+    def plot_multi_bar(
+        self,
+        labels,
+        series,
+        title,
+        ylabel,
+        count_series=None,
+        note_text="",
+        show_labels=True,
+    ):
         self.ax.clear()
         if labels and series:
             total = len(series)
@@ -380,7 +398,7 @@ class ChartCanvas(FigureCanvas):
                 offset = (idx - (total - 1) / 2) * width
                 positions = [x + offset for x in x_positions]
                 bars = self.ax.bar(positions, values, width=width, label=name)
-                if count_series is not None:
+                if count_series is not None and show_labels:
                     counts = count_series[idx]
                     totals = [sum(group) or 1 for group in zip(*count_series)]
                     percents = [(count / total) * 100 for count, total in zip(counts, totals)]
@@ -395,7 +413,16 @@ class ChartCanvas(FigureCanvas):
         self.figure.tight_layout()
         self.draw()
 
-    def plot_stacked_bar(self, labels, series, title, ylabel, count_series=None, note_text=""):
+    def plot_stacked_bar(
+        self,
+        labels,
+        series,
+        title,
+        ylabel,
+        count_series=None,
+        note_text="",
+        show_labels=True,
+    ):
         self.ax.clear()
         if labels and series:
             x_positions = list(range(len(labels)))
@@ -405,7 +432,7 @@ class ChartCanvas(FigureCanvas):
                 totals = [sum(group) or 1 for group in zip(*count_series)]
             for idx, (name, values) in enumerate(series):
                 bars = self.ax.bar(x_positions, values, bottom=bottoms, label=name)
-                if count_series is not None and totals is not None:
+                if count_series is not None and totals is not None and show_labels:
                     counts = count_series[idx]
                     percents = [(count / total) * 100 for count, total in zip(counts, totals)]
                     for bar, bottom, count, percent in zip(bars, bottoms, counts, percents):
@@ -650,8 +677,7 @@ class TextMiningApp(QMainWindow):
         self.buzz_canvas = ChartCanvas()
         self.buzz_canvas.mpl_connect("button_press_event", self.on_buzz_click)
         self.tbl_buzz = QTableWidget()
-        self.tbl_buzz.setColumnCount(3)
-        self.tbl_buzz.setHorizontalHeaderLabels(["date", "metric", "value"])
+        self.tbl_buzz.setColumnCount(0)
         self.tbl_buzz.horizontalHeader().setStretchLastSection(True)
         self.buzz_detail_panel = QGroupBox("버즈 상승 탐색")
         buzz_detail_layout = QVBoxLayout(self.buzz_detail_panel)
@@ -774,11 +800,8 @@ class TextMiningApp(QMainWindow):
         layout = QVBoxLayout(tab)
 
         splitter = QSplitter(Qt.Horizontal)
-        splitter.setSizes([720, 680])
+        splitter.setSizes([900, 300])
         layout.addWidget(splitter)
-
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
 
         pre_group = QGroupBox("토큰화 전 규칙")
         pre_layout = QGridLayout(pre_group)
@@ -853,9 +876,17 @@ class TextMiningApp(QMainWindow):
         pos_layout.addWidget(self.rb_pos_noun_verb)
         pos_layout.addWidget(self.rb_pos_all)
 
-        left_layout.addWidget(pre_group)
-        left_layout.addWidget(post_group)
-        left_layout.addWidget(pos_group)
+        rules_splitter = QSplitter(Qt.Horizontal)
+        rules_splitter.setSizes([520, 520])
+        left_rules = QWidget()
+        left_rules_layout = QVBoxLayout(left_rules)
+        left_rules_layout.addWidget(pre_group)
+        right_rules = QWidget()
+        right_rules_layout = QVBoxLayout(right_rules)
+        right_rules_layout.addWidget(post_group)
+        right_rules_layout.addWidget(pos_group)
+        rules_splitter.addWidget(left_rules)
+        rules_splitter.addWidget(right_rules)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -878,7 +909,7 @@ class TextMiningApp(QMainWindow):
         right_layout.addWidget(self.tbl_preprocess_tokens)
         right_layout.addWidget(self.btn_save_preprocess_tokens, alignment=Qt.AlignRight)
 
-        splitter.addWidget(left)
+        splitter.addWidget(rules_splitter)
         splitter.addWidget(right)
 
         buttons = QHBoxLayout()
@@ -2242,6 +2273,15 @@ class TextMiningApp(QMainWindow):
         tokens = [token.strip() for token in re.split(r"[,\n]", raw_text) if token.strip()]
         return set(tokens)
 
+    def warn_no_tokens(self, feature_name: str):
+        QMessageBox.warning(
+            self,
+            "토큰화 오류",
+            f"{feature_name}에 사용할 토큰이 없습니다.\n"
+            "전처리/토큰화 설정을 확인한 뒤 다시 실행해주세요.",
+        )
+        self.statusBar().showMessage(f"{feature_name}에 사용할 토큰이 없습니다.")
+
     def build_wordcloud_mask(self, shape: str, size: int = 400):
         y, x = np.ogrid[:size, :size]
         center = (size - 1) / 2
@@ -2318,11 +2358,11 @@ class TextMiningApp(QMainWindow):
 
         metric = self.cb_buzz_metric.currentText()
         labels = [self.format_date(val) for val in summary["bucket"]]
-        note_text = "※ n 라벨은 건수/1000, %는 비중"
+        note_text = ""
+        pivot_counts = summary.pivot_table(
+            index="bucket", columns="page_type", values="count", fill_value=0
+        ).sort_index()
         if self.chk_split_by_page_type.isChecked():
-            pivot_counts = summary.pivot_table(
-                index="bucket", columns="page_type", values="count", fill_value=0
-            )
             if metric == "%":
                 pivot = pivot_counts.div(pivot_counts.sum(axis=1).replace(0, 1), axis=0) * 100
                 ylabel = "%"
@@ -2333,7 +2373,13 @@ class TextMiningApp(QMainWindow):
             series = [(str(col), pivot[col].tolist()) for col in pivot_counts.columns]
             count_series = [pivot_counts[col].tolist() for col in pivot_counts.columns]
             self.buzz_canvas.plot_stacked_bar(
-                labels, series, "버즈량", ylabel, count_series=count_series, note_text=note_text
+                labels,
+                series,
+                "버즈량",
+                ylabel,
+                count_series=count_series,
+                note_text=note_text,
+                show_labels=False,
             )
         else:
             count_values = summary["count"].tolist()
@@ -2345,17 +2391,32 @@ class TextMiningApp(QMainWindow):
                 values = count_values
                 ylabel = "count"
             self.buzz_canvas.plot_bar(
-                labels, values, "버즈량", ylabel, count_values=count_values, note_text=note_text
+                labels,
+                values,
+                "버즈량",
+                ylabel,
+                count_values=count_values,
+                note_text=note_text,
+                show_labels=False,
             )
         self.chart_images["buzz"] = self.save_chart(self.buzz_canvas, "buzz")
         self.buzz_bucket_labels = labels
         self.buzz_bucket_dates = list(summary["bucket"])
 
-        self.tbl_buzz.setRowCount(len(summary))
-        for row_idx, (_, row) in enumerate(summary.iterrows()):
-            self.tbl_buzz.setItem(row_idx, 0, QTableWidgetItem(self.format_date(row["bucket"])))
-            self.tbl_buzz.setItem(row_idx, 1, QTableWidgetItem(str(row["page_type"])))
-            self.tbl_buzz.setItem(row_idx, 2, QTableWidgetItem(str(row["count"])))
+        if metric == "%":
+            display_df = pivot_counts.div(pivot_counts.sum(axis=1).replace(0, 1), axis=0) * 100
+            display_df = display_df.round(2)
+        else:
+            display_df = pivot_counts
+        columns = [str(col) for col in display_df.columns]
+        self.tbl_buzz.setColumnCount(len(columns) + 1)
+        self.tbl_buzz.setHorizontalHeaderLabels(["기간"] + columns)
+        self.tbl_buzz.setRowCount(len(display_df))
+        for row_idx, (bucket, row) in enumerate(display_df.iterrows()):
+            self.tbl_buzz.setItem(row_idx, 0, QTableWidgetItem(self.format_date(bucket)))
+            for col_idx, col in enumerate(columns, start=1):
+                value = row.get(col, 0)
+                self.tbl_buzz.setItem(row_idx, col_idx, QTableWidgetItem(str(value)))
 
     def on_buzz_click(self, event):
         if self.df_clean is None or event.xdata is None:
@@ -2433,6 +2494,12 @@ class TextMiningApp(QMainWindow):
         tokens = list(itertools.chain.from_iterable(
             self.tokenize_text(text) for text in df["full_text"]
         ))
+        if not tokens:
+            self.lbl_wc_count.setText("토큰 0 / 고유 0")
+            self.lbl_wc_view.setText("토큰화된 데이터가 없습니다")
+            self.tbl_wc_topn.setRowCount(0)
+            self.warn_no_tokens("워드클라우드")
+            return
         series = pd.Series(tokens)
         freq = series.value_counts()
         self.word_freq_df = freq.reset_index().rename(columns={"index": "token", 0: "count"})
@@ -2533,7 +2600,14 @@ class TextMiningApp(QMainWindow):
                         token_lists.append(tokens)
 
         if not token_lists:
-            self.statusBar().showMessage("네트워크 생성에 필요한 토큰이 없습니다.")
+            self.warn_no_tokens("네트워크")
+            self.graph_full = None
+            self.graph_view = None
+            self.network_pos = None
+            self.network_seed_nodes = []
+            self.network_level_map = {}
+            self.draw_network(nx.Graph())
+            self.populate_network_tables(pd.DataFrame(), pd.DataFrame())
             return
 
         node_counts = {}
@@ -2786,6 +2860,7 @@ class TextMiningApp(QMainWindow):
 
         df = self.apply_monthly_sampling(self.df_clean)
         records = []
+        total_token_count = 0
         for _, row in df.iterrows():
             text = row.get("full_text", "")
             prev_final_score = None
@@ -2807,6 +2882,7 @@ class TextMiningApp(QMainWindow):
                 reasons = []
                 for idx, clause in enumerate(clauses):
                     tokens = self.tokenize_text(clause)
+                    total_token_count += len(tokens)
                     matches = self.match_sentiment_tokens(tokens)
                     clause_score, clause_matched, clause_reasons = self.calculate_sentence_score(
                         clause, tokens, matches, use_neg_scope
@@ -2851,6 +2927,19 @@ class TextMiningApp(QMainWindow):
                     }
                 )
                 prev_final_score = score
+
+        if total_token_count == 0:
+            self.warn_no_tokens("감성분석")
+            self.sentiment_records_df = pd.DataFrame()
+            self.sentiment_summary_df = None
+            self.tbl_sent_records.setRowCount(0)
+            self.sent_canvas.ax.clear()
+            self.sent_canvas.draw()
+            self.sent_trend_canvas.ax.clear()
+            self.sent_trend_canvas.draw()
+            self.clear_sentiment_topic_charts()
+            self.txt_voc.clear()
+            return
 
         self.sentiment_records_df = pd.DataFrame(records)
         self.update_sentiment_view()
