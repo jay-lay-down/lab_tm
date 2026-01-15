@@ -294,15 +294,52 @@ class ChartCanvas(FigureCanvas):
         super().__init__(fig)
         self.setParent(parent)
 
-    def plot_bar(self, labels, values, title, ylabel):
+    def add_bar_label_note(self, note_text: str):
+        if not note_text:
+            return
+        self.ax.text(
+            0.99,
+            1.02,
+            note_text,
+            transform=self.ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            color="#555555",
+        )
+
+    def format_bar_label(self, count: float, percent: float) -> str:
+        count_k = count / 1000
+        return f"{count_k:.2f}\n{percent:.1f}%"
+
+    def annotate_bars(self, bars, counts, percents):
+        for bar, count, percent in zip(bars, counts, percents):
+            if count <= 0:
+                continue
+            self.ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() / 2,
+                self.format_bar_label(count, percent),
+                ha="center",
+                va="center",
+                fontsize=8,
+                color="white" if bar.get_height() > 0 else "#333333",
+            )
+
+    def plot_bar(self, labels, values, title, ylabel, count_values=None, note_text=""):
         self.ax.clear()
         if labels:
-            self.ax.bar(labels, values, color="#4b77be")
+            bars = self.ax.bar(labels, values, color="#4b77be")
             self.ax.set_xticks(range(len(labels)))
             self.ax.set_xticklabels(labels, rotation=45, ha="right")
+            if count_values is not None:
+                total = sum(count_values) or 1
+                percents = [(count / total) * 100 for count in count_values]
+                self.annotate_bars(bars, count_values, percents)
         self.ax.set_title(title)
         self.ax.set_ylabel(ylabel)
         self.ax.grid(axis="y", alpha=0.3)
+        self.add_bar_label_note(note_text)
         self.figure.tight_layout()
         self.draw()
 
@@ -333,7 +370,7 @@ class ChartCanvas(FigureCanvas):
         self.figure.tight_layout()
         self.draw()
 
-    def plot_multi_bar(self, labels, series, title, ylabel):
+    def plot_multi_bar(self, labels, series, title, ylabel, count_series=None, note_text=""):
         self.ax.clear()
         if labels and series:
             total = len(series)
@@ -342,23 +379,47 @@ class ChartCanvas(FigureCanvas):
             for idx, (name, values) in enumerate(series):
                 offset = (idx - (total - 1) / 2) * width
                 positions = [x + offset for x in x_positions]
-                self.ax.bar(positions, values, width=width, label=name)
+                bars = self.ax.bar(positions, values, width=width, label=name)
+                if count_series is not None:
+                    counts = count_series[idx]
+                    totals = [sum(group) or 1 for group in zip(*count_series)]
+                    percents = [(count / total) * 100 for count, total in zip(counts, totals)]
+                    self.annotate_bars(bars, counts, percents)
             self.ax.set_xticks(x_positions)
             self.ax.set_xticklabels(labels, rotation=45, ha="right")
             self.ax.legend()
         self.ax.set_title(title)
         self.ax.set_ylabel(ylabel)
         self.ax.grid(axis="y", alpha=0.3)
+        self.add_bar_label_note(note_text)
         self.figure.tight_layout()
         self.draw()
 
-    def plot_stacked_bar(self, labels, series, title, ylabel):
+    def plot_stacked_bar(self, labels, series, title, ylabel, count_series=None, note_text=""):
         self.ax.clear()
         if labels and series:
             x_positions = list(range(len(labels)))
             bottoms = [0] * len(labels)
-            for name, values in series:
-                self.ax.bar(x_positions, values, bottom=bottoms, label=name)
+            totals = None
+            if count_series is not None:
+                totals = [sum(group) or 1 for group in zip(*count_series)]
+            for idx, (name, values) in enumerate(series):
+                bars = self.ax.bar(x_positions, values, bottom=bottoms, label=name)
+                if count_series is not None and totals is not None:
+                    counts = count_series[idx]
+                    percents = [(count / total) * 100 for count, total in zip(counts, totals)]
+                    for bar, bottom, count, percent in zip(bars, bottoms, counts, percents):
+                        if count <= 0:
+                            continue
+                        self.ax.text(
+                            bar.get_x() + bar.get_width() / 2,
+                            bottom + bar.get_height() / 2,
+                            self.format_bar_label(count, percent),
+                            ha="center",
+                            va="center",
+                            fontsize=8,
+                            color="white" if bar.get_height() > 0 else "#333333",
+                        )
                 bottoms = [b + v for b, v in zip(bottoms, values)]
             self.ax.set_xticks(x_positions)
             self.ax.set_xticklabels(labels, rotation=45, ha="right")
@@ -366,6 +427,7 @@ class ChartCanvas(FigureCanvas):
         self.ax.set_title(title)
         self.ax.set_ylabel(ylabel)
         self.ax.grid(axis="y", alpha=0.3)
+        self.add_bar_label_note(note_text)
         self.figure.tight_layout()
         self.draw()
 
@@ -1065,6 +1127,9 @@ class TextMiningApp(QMainWindow):
         self.cb_brand_filter = QComboBox()
         self.cb_brand_filter.addItem("전체")
         self.cb_brand_filter.currentIndexChanged.connect(self.update_sentiment_view)
+        self.cb_sent_page_type = QComboBox()
+        self.cb_sent_page_type.addItem("전체")
+        self.cb_sent_page_type.currentIndexChanged.connect(self.update_sentiment_view)
         self.btn_run_sentiment = QPushButton("감성분석 실행")
         self.btn_run_sentiment.clicked.connect(self.run_sentiment)
         self.chk_monthly_sample_sent = self.create_monthly_sampling_checkbox()
@@ -1084,7 +1149,9 @@ class TextMiningApp(QMainWindow):
         filter_layout.addWidget(self.btn_run_sentiment, 1, 2)
         filter_layout.addWidget(QLabel("토픽"), 1, 3)
         filter_layout.addWidget(self.cb_brand_filter, 1, 4, 1, 2)
-        filter_layout.addWidget(self.lbl_sent_period_range, 1, 6, 1, 3)
+        filter_layout.addWidget(QLabel("page_type"), 1, 6)
+        filter_layout.addWidget(self.cb_sent_page_type, 1, 7)
+        filter_layout.addWidget(self.lbl_sent_period_range, 1, 8, 1, 2)
         top_layout.addWidget(filter_row)
 
         rules_group = QGroupBox("룰 기반 보정")
@@ -1380,6 +1447,7 @@ class TextMiningApp(QMainWindow):
         self.cb_page_type_filter.blockSignals(True)
         self.cb_page_type_filter.clear()
         self.cb_page_type_filter.addItem("전체")
+        self.populate_sentiment_page_type_filter()
         if self.df_raw is None:
             self.cb_page_type_filter.blockSignals(False)
             return
@@ -1395,6 +1463,20 @@ class TextMiningApp(QMainWindow):
             self.list_page_type.addItem(item)
             self.cb_page_type_filter.addItem(val)
         self.cb_page_type_filter.blockSignals(False)
+        self.populate_sentiment_page_type_filter()
+
+    def populate_sentiment_page_type_filter(self):
+        if not hasattr(self, "cb_sent_page_type"):
+            return
+        self.cb_sent_page_type.blockSignals(True)
+        self.cb_sent_page_type.clear()
+        self.cb_sent_page_type.addItem("전체")
+        source_df = self.df_clean if self.df_clean is not None else self.df_raw
+        if source_df is not None and "page_type" in source_df.columns:
+            unique_vals = sorted({str(val) for val in source_df["page_type"].dropna().unique()})
+            for val in unique_vals:
+                self.cb_sent_page_type.addItem(val)
+        self.cb_sent_page_type.blockSignals(False)
 
     def select_all_page_types(self):
         for idx in range(self.list_page_type.count()):
@@ -1465,6 +1547,7 @@ class TextMiningApp(QMainWindow):
         self.df_clean = df_mapped[["date", "page_type", "full_text"]]
         self.lbl_rows.setText(f"원본 {len(self.df_raw)} → 현재 {len(self.df_clean)}")
         self.update_preview(self.df_clean)
+        self.populate_sentiment_page_type_filter()
         self.update_gate_state()
 
     def update_preview(self, df):
@@ -1499,6 +1582,7 @@ class TextMiningApp(QMainWindow):
         self.cb_brand_filter.addItem("전체")
         for brand in sorted(self.brand_map.keys()):
             self.cb_brand_filter.addItem(brand)
+        self.cb_brand_filter.addItem("기타")
         self.cb_brand_filter.blockSignals(False)
 
     def remove_selected_topic(self):
@@ -1686,14 +1770,16 @@ class TextMiningApp(QMainWindow):
         }.get(score, str(score))
 
     def match_topic(self, text: str) -> str:
-        if not self.brand_map or not isinstance(text, str):
-            return "전체"
+        if not isinstance(text, str):
+            return "기타"
+        if not self.brand_map:
+            return "기타"
         lowered = text.lower()
         for topic, keywords in self.brand_map.items():
             for keyword in keywords:
                 if keyword.lower() in lowered:
                     return topic
-        return "전체"
+        return "기타"
 
     def apply_stopwords(self):
         raw = self.txt_stopwords.toPlainText()
@@ -2221,27 +2307,35 @@ class TextMiningApp(QMainWindow):
 
         metric = self.cb_buzz_metric.currentText()
         labels = [self.format_date(val) for val in summary["bucket"]]
+        note_text = "※ n 라벨은 건수/1000, %는 비중"
         if self.chk_split_by_page_type.isChecked():
-            pivot = summary.pivot_table(
+            pivot_counts = summary.pivot_table(
                 index="bucket", columns="page_type", values="count", fill_value=0
             )
             if metric == "%":
-                pivot = pivot.div(pivot.sum(axis=1).replace(0, 1), axis=0) * 100
+                pivot = pivot_counts.div(pivot_counts.sum(axis=1).replace(0, 1), axis=0) * 100
                 ylabel = "%"
             else:
+                pivot = pivot_counts
                 ylabel = "count"
-            labels = [self.format_date(val) for val in pivot.index]
-            series = [(str(col), pivot[col].tolist()) for col in pivot.columns]
-            self.buzz_canvas.plot_stacked_bar(labels, series, "버즈량", ylabel)
+            labels = [self.format_date(val) for val in pivot_counts.index]
+            series = [(str(col), pivot[col].tolist()) for col in pivot_counts.columns]
+            count_series = [pivot_counts[col].tolist() for col in pivot_counts.columns]
+            self.buzz_canvas.plot_stacked_bar(
+                labels, series, "버즈량", ylabel, count_series=count_series, note_text=note_text
+            )
         else:
-            values = summary["count"].tolist()
+            count_values = summary["count"].tolist()
             if metric == "%":
-                total = sum(values) or 1
-                values = [round(val / total * 100, 2) for val in values]
+                total = sum(count_values) or 1
+                values = [round(val / total * 100, 2) for val in count_values]
                 ylabel = "%"
             else:
+                values = count_values
                 ylabel = "count"
-            self.buzz_canvas.plot_bar(labels, values, "버즈량", ylabel)
+            self.buzz_canvas.plot_bar(
+                labels, values, "버즈량", ylabel, count_values=count_values, note_text=note_text
+            )
         self.chart_images["buzz"] = self.save_chart(self.buzz_canvas, "buzz")
         self.buzz_bucket_labels = labels
         self.buzz_bucket_dates = list(summary["bucket"])
@@ -2767,9 +2861,22 @@ class TextMiningApp(QMainWindow):
         self.update_sentiment_range_label(df)
         mode = self.cb_sent_mode.currentText()
         topic_filter = self.cb_brand_filter.currentText()
+        page_filter = self.cb_sent_page_type.currentText()
         self.cb_brand_filter.setEnabled(mode == "사전별 감성")
         if mode == "사전별 감성" and topic_filter != "전체":
             df = df[df["topic"] == topic_filter]
+        if page_filter != "전체":
+            df = df[df["page_type"] == page_filter]
+        if df.empty:
+            self.tbl_sent_records.setRowCount(0)
+            self.sent_canvas.ax.clear()
+            self.sent_canvas.draw()
+            self.sent_trend_canvas.ax.clear()
+            self.sent_trend_canvas.draw()
+            self.clear_sentiment_topic_charts()
+            self.txt_voc.clear()
+            self.statusBar().showMessage("선택한 필터에 감성 데이터가 없습니다.")
+            return
 
         view = self.cb_sent_view.currentText()
         if view == "월별":
@@ -2924,37 +3031,52 @@ class TextMiningApp(QMainWindow):
         metric = self.cb_sent_metric.currentText()
         score_order = [-2, -1, 0, 1, 2]
         labels = [self.sentiment_bucket_label(score) for score in score_order]
+        note_text = "※ n 라벨은 건수/1000, %는 비중"
         if "topic" in summary.columns:
-            pivot = summary.pivot_table(
+            pivot_counts = summary.pivot_table(
                 index="score", columns="topic", values="count", fill_value=0
             ).reindex(score_order, fill_value=0)
             if metric == "%":
-                pivot = pivot.div(pivot.sum(axis=1).replace(0, 1), axis=0) * 100
+                pivot = pivot_counts.div(pivot_counts.sum(axis=1).replace(0, 1), axis=0) * 100
                 ylabel = "%"
             else:
+                pivot = pivot_counts
                 ylabel = "count"
-            series = [(str(col), pivot[col].tolist()) for col in pivot.columns]
-            self.sent_canvas.plot_stacked_bar(labels, series, "감성 분포", ylabel)
+            series = [(str(col), pivot[col].tolist()) for col in pivot_counts.columns]
+            count_series = [pivot_counts[col].tolist() for col in pivot_counts.columns]
+            self.sent_canvas.plot_stacked_bar(
+                labels,
+                series,
+                "감성 분포",
+                ylabel,
+                count_series=count_series,
+                note_text=note_text,
+            )
         else:
             counts = {score: 0 for score in score_order}
             for _, row in summary.iterrows():
                 counts[row["score"]] = int(row["count"])
-            values = [counts[score] for score in score_order]
+            count_values = [counts[score] for score in score_order]
             if metric == "%":
-                total = sum(values) or 1
-                values = [round(value / total * 100, 2) for value in values]
+                total = sum(count_values) or 1
+                values = [round(value / total * 100, 2) for value in count_values]
                 ylabel = "%"
             else:
+                values = count_values
                 ylabel = "count"
             self.sent_canvas.ax.clear()
             bar_colors = [SENTIMENT_COLORS[score] for score in score_order]
             if labels:
-                self.sent_canvas.ax.bar(labels, values, color=bar_colors)
+                bars = self.sent_canvas.ax.bar(labels, values, color=bar_colors)
                 self.sent_canvas.ax.set_xticks(range(len(labels)))
                 self.sent_canvas.ax.set_xticklabels(labels, rotation=45, ha="right")
+                total = sum(count_values) or 1
+                percents = [(count / total) * 100 for count in count_values]
+                self.sent_canvas.annotate_bars(bars, count_values, percents)
             self.sent_canvas.ax.set_title("감성 분포")
             self.sent_canvas.ax.set_ylabel(ylabel)
             self.sent_canvas.ax.grid(axis="y", alpha=0.3)
+            self.sent_canvas.add_bar_label_note(note_text)
             self.sent_canvas.figure.tight_layout()
             self.sent_canvas.draw()
         self.chart_images["sentiment"] = self.save_chart(self.sent_canvas, "sentiment")
@@ -2974,14 +3096,15 @@ class TextMiningApp(QMainWindow):
         labels = [self.sentiment_bucket_label(score) for score in score_order]
         metric = self.cb_sent_metric.currentText()
         summary = df.groupby(["topic", "score"]).size().reset_index(name="count")
-        pivot = summary.pivot_table(index="topic", columns="score", values="count", fill_value=0)
-        pivot = pivot.reindex(columns=score_order, fill_value=0)
+        pivot_counts = summary.pivot_table(index="topic", columns="score", values="count", fill_value=0)
+        pivot_counts = pivot_counts.reindex(columns=score_order, fill_value=0)
         if metric == "%":
-            pivot = pivot.div(pivot.sum(axis=1).replace(0, 1), axis=0) * 100
+            pivot = pivot_counts.div(pivot_counts.sum(axis=1).replace(0, 1), axis=0) * 100
             ylabel = "%"
         else:
+            pivot = pivot_counts
             ylabel = "count"
-        topics = list(pivot.index)
+        topics = list(pivot_counts.index)
         series = [
             (label, pivot[score].tolist(), SENTIMENT_COLORS.get(score, "#999999"))
             for label, score in zip(labels, score_order)
@@ -2989,29 +3112,33 @@ class TextMiningApp(QMainWindow):
         self.sent_topic_canvas.ax.clear()
         x_positions = list(range(len(topics)))
         bottoms = [0] * len(topics)
-        for label, values, color in series:
+        totals = pivot_counts.sum(axis=1).replace(0, 1).tolist()
+        note_text = "※ n 라벨은 건수/1000, %는 비중"
+        for score_idx, (label, values, color) in enumerate(series):
             bars = self.sent_topic_canvas.ax.bar(
                 x_positions, values, bottom=bottoms, label=label, color=color
             )
-            if metric == "%":
-                for bar, bottom, value in zip(bars, bottoms, values):
-                    if value <= 0:
-                        continue
-                    self.sent_topic_canvas.ax.text(
-                        bar.get_x() + bar.get_width() / 2,
-                        bottom + value / 2,
-                        f"{value:.1f}%",
-                        ha="center",
-                        va="center",
-                        fontsize=8,
-                        color="white" if value >= 15 else "#333333",
-                    )
+            counts = pivot_counts[score_order[score_idx]].tolist()
+            percents = [(count / total) * 100 for count, total in zip(counts, totals)]
+            for bar, bottom, count, percent in zip(bars, bottoms, counts, percents):
+                if count <= 0:
+                    continue
+                self.sent_topic_canvas.ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bottom + bar.get_height() / 2,
+                    self.sent_topic_canvas.format_bar_label(count, percent),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color="white" if bar.get_height() > 0 else "#333333",
+                )
             bottoms = [b + v for b, v in zip(bottoms, values)]
         self.sent_topic_canvas.ax.set_xticks(x_positions)
         self.sent_topic_canvas.ax.set_xticklabels(topics, rotation=45, ha="right")
         self.sent_topic_canvas.ax.set_ylabel(ylabel)
         self.sent_topic_canvas.ax.set_title("사전 대표단어 감성 스택")
         self.sent_topic_canvas.ax.legend(loc="upper right")
+        self.sent_topic_canvas.add_bar_label_note(note_text)
         self.sent_topic_canvas.figure.tight_layout()
         self.sent_topic_canvas.draw()
         self.sent_topic_charts_layout.addWidget(self.sent_topic_canvas)
