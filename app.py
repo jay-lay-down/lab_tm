@@ -1601,7 +1601,10 @@ class TextMiningApp(QMainWindow):
             if self.list_export_items.item(i).checkState() == Qt.Checked
         }
 
-        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        writer_kwargs = {"engine": "openpyxl"}
+        if os.path.exists(path):
+            writer_kwargs.update({"mode": "a", "if_sheet_exists": "replace"})
+        with pd.ExcelWriter(path, **writer_kwargs) as writer:
             if "clean_data" in items and self.df_clean is not None:
                 self.df_clean.to_excel(writer, sheet_name="clean_data", index=False)
             if "buzz_summary" in items and self.buzz_df is not None:
