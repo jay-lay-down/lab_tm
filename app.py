@@ -151,7 +151,7 @@ class ChartCanvas(FigureCanvas):
 class TextMiningApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Text Mining Tool - PyQt")
+        self.setWindowTitle("Text Mining Tool")
         self.resize(1400, 900)
 
         self.df_raw = None
@@ -189,6 +189,13 @@ class TextMiningApp(QMainWindow):
         self._build_tab_network()
         self._build_tab_sentiment()
         self._build_tab_export()
+
+        self.footer_label = QLabel(
+            'made by jihee.cho (<a href="https://github.com/jay-lay-down">https://github.com/jay-lay-down</a>)'
+        )
+        self.footer_label.setOpenExternalLinks(True)
+        self.footer_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.footer_label)
 
         self.update_gate_state()
 
@@ -475,37 +482,50 @@ class TextMiningApp(QMainWindow):
         layout = QVBoxLayout(tab)
 
         top = QWidget()
-        top.setFixedHeight(80)
+        top.setFixedHeight(120)
         top_layout = QGridLayout(top)
+        self.cb_sent_mode = QComboBox()
+        self.cb_sent_mode.addItems(["전체 감성", "사전별 감성"])
+        self.cb_sent_mode.currentIndexChanged.connect(self.update_sentiment_view)
         self.cb_sent_view = QComboBox()
         self.cb_sent_view.addItems(["전체", "월별", "채널별"])
         self.cb_sent_view.currentIndexChanged.connect(self.update_sentiment_view)
         self.cb_sent_metric = QComboBox()
         self.cb_sent_metric.addItems(["count", "%"])
         self.cb_sent_metric.currentIndexChanged.connect(self.update_sentiment_view)
+        self.cb_sentence_split = QComboBox()
+        self.cb_sentence_split.addItems(["기본", "강함(쉼표 포함)"])
         self.cb_brand_filter = QComboBox()
         self.cb_brand_filter.addItem("전체")
         self.cb_brand_filter.currentIndexChanged.connect(self.update_sentiment_view)
         self.btn_run_sentiment = QPushButton("감성분석 실행")
         self.btn_run_sentiment.clicked.connect(self.run_sentiment)
 
-        top_layout.addWidget(self.cb_sent_view, 0, 0)
-        top_layout.addWidget(self.cb_sent_metric, 0, 1)
-        top_layout.addWidget(self.cb_brand_filter, 0, 2)
-        top_layout.addWidget(self.btn_run_sentiment, 0, 4)
+        top_layout.addWidget(QLabel("모드"), 0, 0)
+        top_layout.addWidget(self.cb_sent_mode, 0, 1)
+        top_layout.addWidget(QLabel("보기"), 0, 2)
+        top_layout.addWidget(self.cb_sent_view, 0, 3)
+        top_layout.addWidget(QLabel("지표"), 0, 4)
+        top_layout.addWidget(self.cb_sent_metric, 0, 5)
+        top_layout.addWidget(QLabel("문장 분리"), 0, 6)
+        top_layout.addWidget(self.cb_sentence_split, 0, 7)
+        top_layout.addWidget(self.btn_run_sentiment, 0, 8)
+        top_layout.addWidget(QLabel("토픽"), 1, 0)
+        top_layout.addWidget(self.cb_brand_filter, 1, 1, 1, 2)
 
         layout.addWidget(top)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setSizes([720, 480])
         self.tbl_sent_records = QTableWidget()
-        self.tbl_sent_records.setColumnCount(5)
+        self.tbl_sent_records.setColumnCount(6)
         self.tbl_sent_records.setHorizontalHeaderLabels([
             "date",
             "page_type",
-            "text",
+            "sentence",
             "score",
             "label",
+            "topic",
         ])
         self.tbl_sent_records.horizontalHeader().setStretchLastSection(True)
         self.sent_canvas = ChartCanvas()
@@ -697,6 +717,54 @@ class TextMiningApp(QMainWindow):
             self.cb_brand_filter.addItem(brand)
         self.cb_brand_filter.blockSignals(False)
         self.statusBar().showMessage("브랜드 사전을 적용했습니다.")
+
+    def split_sentiment_sentences(self, text: str):
+        if not isinstance(text, str):
+            return []
+        mode = self.cb_sentence_split.currentText()
+        pattern = r"[.!?。！？\n]+"
+        if mode.startswith("강함"):
+            pattern = r"[.!?。！？\n,]+"
+        parts = re.split(pattern, text)
+        sentences = []
+        for part in parts:
+            sentence = part.strip()
+            if not sentence or len(sentence) < 3:
+                continue
+            if not re.search(r"[A-Za-z0-9가-힣]", sentence):
+                continue
+            sentences.append(sentence)
+        return sentences
+
+    def bin_sentiment_score(self, raw_score: float) -> int:
+        if raw_score <= -2:
+            return -2
+        if raw_score <= -0.5:
+            return -1
+        if raw_score < 0.5:
+            return 0
+        if raw_score < 2:
+            return 1
+        return 2
+
+    def sentiment_score_label(self, score: int) -> str:
+        return {
+            -2: "가장 나쁨",
+            -1: "나쁨",
+            0: "중립",
+            1: "좋음",
+            2: "가장 좋음",
+        }.get(score, "중립")
+
+    def match_topic(self, text: str) -> str:
+        if not self.brand_map or not isinstance(text, str):
+            return "전체"
+        lowered = text.lower()
+        for topic, keywords in self.brand_map.items():
+            for keyword in keywords:
+                if keyword.lower() in lowered:
+                    return topic
+        return "전체"
 
     def apply_stopwords(self):
         self.stopwords = {line.strip() for line in self.txt_stopwords.toPlainText().splitlines() if line.strip()}
@@ -1002,24 +1070,23 @@ class TextMiningApp(QMainWindow):
         records = []
         for _, row in self.df_clean.iterrows():
             text = row.get("full_text", "")
-            tokens = self.tokenize_text(text)
-            score = sum(self.senti_dict.get(token, 0) for token in tokens)
-            label = "중립"
-            if score > 0:
-                label = "긍정"
-            elif score < 0:
-                label = "부정"
-            brand = self.match_brand(text)
-            records.append(
-                {
-                    "date": row.get("date"),
-                    "page_type": row.get("page_type"),
-                    "text": text,
-                    "score": score,
-                    "label": label,
-                    "brand": brand,
-                }
-            )
+            for sentence in self.split_sentiment_sentences(text):
+                tokens = self.tokenize_text(sentence)
+                scores = [self.senti_dict.get(token, 0) for token in tokens if token]
+                raw_score = sum(scores) / len(scores) if scores else 0
+                score = self.bin_sentiment_score(raw_score)
+                label = self.sentiment_score_label(score)
+                topic = self.match_topic(sentence)
+                records.append(
+                    {
+                        "date": row.get("date"),
+                        "page_type": row.get("page_type"),
+                        "sentence": sentence,
+                        "score": score,
+                        "label": label,
+                        "topic": topic,
+                    }
+                )
 
         self.sentiment_records_df = pd.DataFrame(records)
         self.update_sentiment_view()
@@ -1028,9 +1095,11 @@ class TextMiningApp(QMainWindow):
         if self.sentiment_records_df is None or self.sentiment_records_df.empty:
             return
         df = self.sentiment_records_df.copy()
-        brand_filter = self.cb_brand_filter.currentText()
-        if brand_filter != "전체":
-            df = df[df["brand"] == brand_filter]
+        mode = self.cb_sent_mode.currentText()
+        topic_filter = self.cb_brand_filter.currentText()
+        self.cb_brand_filter.setEnabled(mode == "사전별 감성")
+        if mode == "사전별 감성" and topic_filter != "전체":
+            df = df[df["topic"] == topic_filter]
 
         view = self.cb_sent_view.currentText()
         if view == "월별":
@@ -1040,10 +1109,15 @@ class TextMiningApp(QMainWindow):
         else:
             df["bucket"] = "전체"
 
-        summary = df.groupby(["bucket", "label"]).size().reset_index(name="count")
+        summary = (
+            df.groupby(["bucket", "score", "label", "topic"])
+            .size()
+            .reset_index(name="count")
+        )
         self.sentiment_summary_df = summary
         self.populate_sentiment_table(df)
-        self.plot_sentiment_chart(summary)
+        chart_summary = df.groupby(["score", "label"]).size().reset_index(name="count")
+        self.plot_sentiment_chart(chart_summary)
 
     def populate_sentiment_table(self, df):
         show_records = df.head(200)
@@ -1051,22 +1125,26 @@ class TextMiningApp(QMainWindow):
         for row_idx, (_, row) in enumerate(show_records.iterrows()):
             self.tbl_sent_records.setItem(row_idx, 0, QTableWidgetItem(self.format_date(row["date"])))
             self.tbl_sent_records.setItem(row_idx, 1, QTableWidgetItem(str(row["page_type"])))
-            self.tbl_sent_records.setItem(row_idx, 2, QTableWidgetItem(str(row["text"])))
+            self.tbl_sent_records.setItem(row_idx, 2, QTableWidgetItem(str(row["sentence"])))
             self.tbl_sent_records.setItem(row_idx, 3, QTableWidgetItem(str(row["score"])))
             self.tbl_sent_records.setItem(row_idx, 4, QTableWidgetItem(str(row["label"])))
+            self.tbl_sent_records.setItem(row_idx, 5, QTableWidgetItem(str(row["topic"])))
 
     def plot_sentiment_chart(self, summary):
         metric = self.cb_sent_metric.currentText()
+        score_order = [-2, -1, 0, 1, 2]
+        counts = {score: 0 for score in score_order}
+        for _, row in summary.iterrows():
+            counts[row["score"]] = int(row["count"])
+        values = [counts[score] for score in score_order]
         if metric == "%":
-            total = summary["count"].sum()
-            summary["value"] = (summary["count"] / total * 100).round(2)
+            total = sum(values) or 1
+            values = [round(value / total * 100, 2) for value in values]
             ylabel = "%"
         else:
-            summary["value"] = summary["count"]
             ylabel = "count"
-        labels = [f"{bucket}-{label}" for bucket, label in summary[["bucket", "label"]].values]
-        values = summary["value"].tolist()
-        self.sent_canvas.plot_bar(labels, values, "감성분석", ylabel)
+        labels = [str(score) for score in score_order]
+        self.sent_canvas.plot_bar(labels, values, "감성 분포", ylabel)
         self.chart_images["sentiment"] = self.save_chart(self.sent_canvas, "sentiment")
 
     def choose_output_dir(self):
