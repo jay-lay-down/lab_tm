@@ -53,6 +53,7 @@ DEFAULT_RESOURCE_DIR = Path(r"C:\Users\70089004\text_file")
 DEFAULT_FONT_NAME = "Pretendard-Medium.otf"
 DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
 DEFAULT_NETWORK_FONT_NAME = "malgun.ttf"
+PERIOD_ALL_LABEL = "전체 기간"
 FALLBACK_FONT_NAMES = [
     "Pretendard",
     "Malgun Gothic",
@@ -860,7 +861,7 @@ class TextMiningApp(QMainWindow):
     def populate_period_values(self, unit_combo: QComboBox, value_combo: QComboBox, df: pd.DataFrame | None):
         value_combo.blockSignals(True)
         value_combo.clear()
-        value_combo.addItem("전체")
+        value_combo.addItem(PERIOD_ALL_LABEL)
         if df is None or df.empty or "date" not in df.columns:
             value_combo.blockSignals(False)
             return
@@ -892,7 +893,7 @@ class TextMiningApp(QMainWindow):
             return df
         unit = unit_combo.currentText()
         value = value_combo.currentText()
-        if value == "전체":
+        if value in {PERIOD_ALL_LABEL, "전체"}:
             return df
         dates = df["date"]
         if unit == "연도":
