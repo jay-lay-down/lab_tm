@@ -205,6 +205,22 @@ def parse_brand_dictionary(raw_text: str):
     return brand_map
 
 
+ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff]")
+SPACE_RE = re.compile(r"\s+")
+
+
+def normalize_term(value: str) -> str:
+    if value is None:
+        return ""
+    text = ZERO_WIDTH_RE.sub("", str(value)).strip()
+    if not text or text.lower() in ("nan", "none", "null"):
+        return ""
+    text = SPACE_RE.sub("", text)
+    if not re.search(r"[가-힣A-Za-z0-9]", text):
+        return ""
+    return text
+
+
 def normalize_column_name(name: str):
     return re.sub(r"[\s_]", "", name.lower())
 
@@ -583,14 +599,14 @@ class TextMiningApp(QMainWindow):
         self.sb_min_edge_weight.setValue(3)
         self.lbl_min_edge = QLabel("엣지 최소 가중치")
         self.sb_max_nodes = QSpinBox()
-        self.sb_max_nodes.setRange(50, 1000)
-        self.sb_max_nodes.setValue(300)
+        self.sb_max_nodes.setRange(50, 5000)
+        self.sb_max_nodes.setValue(1000)
         self.lbl_max_nodes = QLabel("최대 노드 수")
 
         self.le_node_search = QLineEdit()
         self.le_node_search.setPlaceholderText("노드 검색")
-        self.btn_add_seed = QPushButton("Seed 추가")
-        self.btn_add_seed.clicked.connect(self.add_seed)
+        self.btn_add_seed = QPushButton("노드 선택")
+        self.btn_add_seed.clicked.connect(self.select_node_from_search)
         self.cb_hop_depth = QComboBox()
         self.cb_hop_depth.addItems(["1", "2", "3", "4"])
         self.cb_hop_depth.setCurrentIndex(1)
@@ -633,14 +649,10 @@ class TextMiningApp(QMainWindow):
 
         splitter.addWidget(top)
 
-        mid = QSplitter(Qt.Horizontal)
-        mid.setSizes([650, 350])
         self.list_nodes_ranked = QListWidget()
-        self.list_nodes_ranked.itemDoubleClicked.connect(self.add_seed_from_list)
-        self.list_seed_nodes = QListWidget()
-        mid.addWidget(self.list_nodes_ranked)
-        mid.addWidget(self.list_seed_nodes)
-        splitter.addWidget(mid)
+        self.list_nodes_ranked.setSelectionMode(QListWidget.ExtendedSelection)
+        self.list_nodes_ranked.itemDoubleClicked.connect(self.toggle_node_selection)
+        splitter.addWidget(self.list_nodes_ranked)
 
         bottom = QSplitter(Qt.Horizontal)
         bottom.setSizes([700, 500])
@@ -1293,13 +1305,15 @@ class TextMiningApp(QMainWindow):
         token_lists = []
         if scope == "문서(로우)":
             for text in self.df_clean["full_text"]:
-                tokens = self.tokenize_text(text)
+                tokens = [normalize_term(token) for token in self.tokenize_text(text)]
+                tokens = [token for token in tokens if token]
                 if len(tokens) > 1:
                     token_lists.append(tokens)
         else:
             for text in self.df_clean["full_text"]:
                 for sentence in split_sentences(text):
-                    tokens = self.tokenize_text(sentence)
+                    tokens = [normalize_term(token) for token in self.tokenize_text(sentence)]
+                    tokens = [token for token in tokens if token]
                     if len(tokens) > 1:
                         token_lists.append(tokens)
 
@@ -1376,18 +1390,29 @@ class TextMiningApp(QMainWindow):
         for node in nodes:
             self.list_nodes_ranked.addItem(node)
 
-    def add_seed_from_list(self, item):
-        self.list_seed_nodes.addItem(item.text())
+    def toggle_node_selection(self, item):
+        if item is None:
+            return
+        if item.isSelected():
+            item.setSelected(False)
+        else:
+            item.setSelected(True)
 
-    def add_seed(self):
+    def select_node_from_search(self):
         text = self.le_node_search.text().strip()
-        if text:
-            self.list_seed_nodes.addItem(text)
+        if not text:
+            return
+        matches = self.list_nodes_ranked.findItems(text, Qt.MatchExactly)
+        if matches:
+            self.list_nodes_ranked.clearSelection()
+            matches[0].setSelected(True)
+            self.list_nodes_ranked.scrollToItem(matches[0])
 
     def apply_hop(self):
         if self.graph_full is None:
             return
-        seeds = [self.list_seed_nodes.item(i).text() for i in range(self.list_seed_nodes.count())]
+        selected = self.list_nodes_ranked.selectedItems()
+        seeds = [item.text() for item in selected]
         if not seeds:
             self.statusBar().showMessage("Seed 노드를 선택해주세요.")
             return
