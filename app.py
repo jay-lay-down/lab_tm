@@ -1669,6 +1669,17 @@ class TextMiningApp(QMainWindow):
             if token_len > self.senti_max_n:
                 self.senti_max_n = token_len
 
+    def ensure_topic_dictionary(self, show_warning: bool = True) -> bool:
+        if self.brand_map:
+            return True
+        if show_warning:
+            QMessageBox.warning(
+                self,
+                "토픽 사전 없음",
+                "사전별 감성을 보려면 먼저 토픽 사전을 추가하세요.",
+            )
+        return False
+
     def match_sentiment_tokens(self, tokens):
         if not tokens or not self.senti_dict:
             return []
@@ -2862,6 +2873,12 @@ class TextMiningApp(QMainWindow):
         mode = self.cb_sent_mode.currentText()
         topic_filter = self.cb_brand_filter.currentText()
         page_filter = self.cb_sent_page_type.currentText()
+        if mode == "사전별 감성" and not self.ensure_topic_dictionary():
+            self.cb_sent_mode.blockSignals(True)
+            self.cb_sent_mode.setCurrentText("전체 감성")
+            self.cb_sent_mode.blockSignals(False)
+            mode = "전체 감성"
+            topic_filter = "전체"
         self.cb_brand_filter.setEnabled(mode == "사전별 감성")
         if mode == "사전별 감성" and topic_filter != "전체":
             df = df[df["topic"] == topic_filter]
