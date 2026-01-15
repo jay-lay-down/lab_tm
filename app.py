@@ -51,6 +51,7 @@ KNU_DICT_URL = "https://raw.githubusercontent.com/park1200656/KnuSentiLex/master
 DEFAULT_RESOURCE_DIR = Path(r"C:\Users\70089004\text_file")
 DEFAULT_FONT_NAME = "Pretendard-Medium.otf"
 DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
+DEFAULT_NETWORK_FONT_NAME = "malgun.ttf"
 FALLBACK_FONT_NAMES = [
     "Pretendard",
     "Malgun Gothic",
@@ -91,11 +92,26 @@ def resolve_font_path() -> str | None:
     return None
 
 
+def resolve_network_font_path() -> str | None:
+    network_font_path = first_existing_path(DEFAULT_NETWORK_FONT_NAME)
+    if network_font_path:
+        return str(network_font_path)
+    return resolve_font_path()
+
+
+def resolve_font_name(font_path: str | None) -> str | None:
+    if not font_path:
+        return None
+    fm.fontManager.addfont(font_path)
+    return fm.FontProperties(fname=font_path).get_name()
+
+
 def configure_matplotlib_font(font_path: str | None):
     if not font_path:
         return
-    fm.fontManager.addfont(font_path)
-    font_name = fm.FontProperties(fname=font_path).get_name()
+    font_name = resolve_font_name(font_path)
+    if not font_name:
+        return
     plt.rcParams["font.family"] = font_name
     plt.rcParams["axes.unicode_minus"] = False
 
@@ -302,6 +318,8 @@ class TextMiningApp(QMainWindow):
         self.senti_max_n = 1
         self.kiwi = Kiwi()
         self.font_path = resolve_font_path()
+        self.network_font_path = resolve_network_font_path()
+        self.network_font_name = resolve_font_name(self.network_font_path)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1419,7 +1437,10 @@ class TextMiningApp(QMainWindow):
         pos = self.network_pos
         nx.draw_networkx_nodes(graph, pos, ax=self.network_canvas.ax, node_size=200, node_color="#6baed6")
         nx.draw_networkx_edges(graph, pos, ax=self.network_canvas.ax, width=1.0, edge_color="#999999")
-        nx.draw_networkx_labels(graph, pos, ax=self.network_canvas.ax, font_size=8)
+        label_kwargs = {"font_size": 8}
+        if self.network_font_name:
+            label_kwargs["font_family"] = self.network_font_name
+        nx.draw_networkx_labels(graph, pos, ax=self.network_canvas.ax, **label_kwargs)
         self.network_canvas.ax.set_title("네트워크")
         self.network_canvas.ax.axis("off")
         self.network_canvas.draw()
