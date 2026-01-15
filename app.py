@@ -3,11 +3,13 @@ import json
 import os
 import re
 import sys
+from typing import List
 from datetime import datetime
 from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib import font_manager as fm
 import networkx as nx
 import pandas as pd
 import requests
@@ -29,6 +31,8 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
+    QMenu,
     QPushButton,
     QSplitter,
     QSpinBox,
@@ -44,11 +48,29 @@ from wordcloud import WordCloud
 matplotlib.use("Qt5Agg")
 
 KNU_DICT_URL = "https://raw.githubusercontent.com/park1200656/KnuSentiLex/master/data/SentiWord_info.json"
+DEFAULT_RESOURCE_DIR = Path(r"C:\Users\70089004\text_file")
+DEFAULT_FONT_NAME = "Pretendard-Medium.otf"
+DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
 
 
 def resource_path(rel_path: str) -> str:
     base = getattr(sys, "_MEIPASS", str(Path(__file__).resolve().parent))
     return str(Path(base) / rel_path)
+
+
+def candidate_resource_paths(filename: str) -> List[Path]:
+    return [
+        Path(resource_path(filename)),
+        DEFAULT_RESOURCE_DIR / filename,
+        Path(__file__).resolve().parent / filename,
+    ]
+
+
+def first_existing_path(filename: str) -> Path | None:
+    for path in candidate_resource_paths(filename):
+        if path.exists():
+            return path
+    return None
 
 
 def parse_sentiment_entries(entries):
@@ -73,10 +95,27 @@ def parse_sentiment_entries(entries):
     return senti_dict
 
 
-def load_knu_dictionary():
-    local_path = resource_path("SentiWord_Dict.txt")
-    if os.path.exists(local_path):
-        with open(local_path, "r", encoding="utf-8") as file:
+def load_knu_dictionary(parent=None):
+    for path in candidate_resource_paths(DEFAULT_SENTI_NAME):
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as file:
+                content = file.read()
+            try:
+                data = json.loads(content)
+            except json.JSONDecodeError:
+                data = content.splitlines()
+            senti_dict = parse_sentiment_entries(data)
+            if senti_dict:
+                return senti_dict
+
+    selected_path, _ = QFileDialog.getOpenFileName(
+        parent,
+        "감성사전 파일 선택",
+        str(DEFAULT_RESOURCE_DIR),
+        "Dictionary Files (*.txt *.json);;All Files (*)",
+    )
+    if selected_path:
+        with open(selected_path, "r", encoding="utf-8") as file:
             content = file.read()
         try:
             data = json.loads(content)
@@ -86,10 +125,20 @@ def load_knu_dictionary():
         if senti_dict:
             return senti_dict
 
-    response = requests.get(KNU_DICT_URL, timeout=10)
-    response.raise_for_status()
-    data = response.json()
-    return parse_sentiment_entries(data)
+    try:
+        response = requests.get(KNU_DICT_URL, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return parse_sentiment_entries(data)
+    except requests.RequestException as exc:
+        QMessageBox.warning(
+            parent,
+            "Dictionary Error",
+            "온라인 감성사전 로드 실패.\n"
+            "내장/로컬 사전을 확인하거나 파일 선택을 이용해주세요.\n"
+            f"{exc}",
+        )
+    return {}
 
 
 def split_sentences(text: str):
@@ -115,6 +164,18 @@ def parse_brand_dictionary(raw_text: str):
 
 def normalize_column_name(name: str):
     return re.sub(r"[\s_]", "", name.lower())
+
+
+def safe_strftime(value):
+    if isinstance(value, (datetime, pd.Timestamp)) and pd.notnull(value):
+        return value.strftime("%Y-%m-%d")
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+    except (TypeError, ValueError):
+        parsed = pd.NaT
+    if isinstance(parsed, (pd.Timestamp, datetime)) and pd.notnull(parsed):
+        return parsed.strftime("%Y-%m-%d")
+    return ""
 
 
 class ChartCanvas(FigureCanvas):
@@ -147,6 +208,42 @@ class ChartCanvas(FigureCanvas):
         self.figure.tight_layout()
         self.draw()
 
+    def plot_multi_bar(self, labels, series, title, ylabel):
+        self.ax.clear()
+        if labels and series:
+            total = len(series)
+            width = 0.8 / total
+            x_positions = list(range(len(labels)))
+            for idx, (name, values) in enumerate(series):
+                offset = (idx - (total - 1) / 2) * width
+                positions = [x + offset for x in x_positions]
+                self.ax.bar(positions, values, width=width, label=name)
+            self.ax.set_xticks(x_positions)
+            self.ax.set_xticklabels(labels, rotation=45, ha="right")
+            self.ax.legend()
+        self.ax.set_title(title)
+        self.ax.set_ylabel(ylabel)
+        self.ax.grid(axis="y", alpha=0.3)
+        self.figure.tight_layout()
+        self.draw()
+
+    def plot_stacked_bar(self, labels, series, title, ylabel):
+        self.ax.clear()
+        if labels and series:
+            x_positions = list(range(len(labels)))
+            bottoms = [0] * len(labels)
+            for name, values in series:
+                self.ax.bar(x_positions, values, bottom=bottoms, label=name)
+                bottoms = [b + v for b, v in zip(bottoms, values)]
+            self.ax.set_xticks(x_positions)
+            self.ax.set_xticklabels(labels, rotation=45, ha="right")
+            self.ax.legend()
+        self.ax.set_title(title)
+        self.ax.set_ylabel(ylabel)
+        self.ax.grid(axis="y", alpha=0.3)
+        self.figure.tight_layout()
+        self.draw()
+
 
 class TextMiningApp(QMainWindow):
     def __init__(self):
@@ -164,6 +261,8 @@ class TextMiningApp(QMainWindow):
         self.wc_image_path = None
         self.graph_full = None
         self.graph_view = None
+        self.network_pos = None
+        self.network_drag_node = None
         self.nodes_df = None
         self.edges_df = None
         self.nodes_view_df = None
@@ -173,6 +272,7 @@ class TextMiningApp(QMainWindow):
         self.chart_images = {}
 
         self.senti_dict = None
+        self.senti_max_n = 1
         self.kiwi = Kiwi()
 
         central = QWidget()
@@ -191,7 +291,7 @@ class TextMiningApp(QMainWindow):
         self._build_tab_export()
 
         self.footer_label = QLabel(
-            'made by jihee.cho (<a href="https://github.com/jay-lay-down">https://github.com/jay-lay-down</a>)'
+            'Made by jihee.cho (<a href="https://github.com/jay-lay-down">https://github.com/jay-lay-down</a>)'
         )
         self.footer_label.setOpenExternalLinks(True)
         self.footer_label.setAlignment(Qt.AlignCenter)
@@ -270,16 +370,20 @@ class TextMiningApp(QMainWindow):
         self.cb_granularity = QComboBox()
         self.cb_granularity.addItems(["일", "주", "월", "분기", "연도"])
         self.chk_split_by_page_type = QCheckBox("page_type 분리")
-        self.sb_topn_page_type = QSpinBox()
-        self.sb_topn_page_type.setRange(1, 20)
-        self.sb_topn_page_type.setValue(5)
+        self.cb_page_type_filter = QComboBox()
+        self.cb_page_type_filter.addItem("전체")
+        self.cb_buzz_metric = QComboBox()
+        self.cb_buzz_metric.addItems(["n", "%"])
         self.btn_refresh_buzz = QPushButton("버즈 계산")
         self.btn_refresh_buzz.clicked.connect(self.build_buzz)
 
         top_layout.addWidget(self.cb_granularity, 0, 0)
         top_layout.addWidget(self.chk_split_by_page_type, 0, 1)
-        top_layout.addWidget(self.sb_topn_page_type, 0, 2)
-        top_layout.addWidget(self.btn_refresh_buzz, 0, 4)
+        top_layout.addWidget(QLabel("page_type"), 0, 2)
+        top_layout.addWidget(self.cb_page_type_filter, 0, 3)
+        top_layout.addWidget(QLabel("지표"), 0, 4)
+        top_layout.addWidget(self.cb_buzz_metric, 0, 5)
+        top_layout.addWidget(self.btn_refresh_buzz, 0, 6)
 
         layout.addWidget(top)
 
@@ -302,25 +406,42 @@ class TextMiningApp(QMainWindow):
         layout = QVBoxLayout(tab)
 
         splitter = QSplitter(Qt.Horizontal)
-        splitter.setSizes([600, 600])
+        splitter.setSizes([600, 800])
         layout.addWidget(splitter)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        self.txt_brand_dict = QTextEdit()
-        self.txt_brand_dict.setPlaceholderText("브랜드: 키워드1|키워드2")
-        self.btn_apply_brand = QPushButton("브랜드 사전 적용")
+        left_split = QSplitter(Qt.Vertical)
+        left_split.setSizes([320, 320])
+
+        topic_group = QGroupBox("핵심 키워드 설정")
+        topic_layout = QVBoxLayout(topic_group)
+        topic_row = QHBoxLayout()
+        self.le_topic_name = QLineEdit()
+        self.le_topic_name.setPlaceholderText("핵심 키워드 1")
+        topic_row.addWidget(self.le_topic_name)
+        self.txt_topic_related = QTextEdit()
+        self.txt_topic_related.setPlaceholderText("관련어를 입력하세요 (쉼표/줄바꿈 구분)")
+        self.txt_topic_related.setFixedHeight(90)
+        self.btn_apply_brand = QPushButton("토픽 추가")
         self.btn_apply_brand.clicked.connect(self.apply_brand_dict)
-        left_layout.addWidget(self.txt_brand_dict)
-        left_layout.addWidget(self.btn_apply_brand)
+        self.list_topics = QListWidget()
+        self.list_topics.setMinimumHeight(120)
+        topic_buttons = QHBoxLayout()
+        self.btn_remove_topic = QPushButton("선택 토픽 삭제")
+        self.btn_remove_topic.clicked.connect(self.remove_selected_topic)
+        topic_buttons.addStretch()
+        topic_buttons.addWidget(self.btn_remove_topic)
+        topic_layout.addLayout(topic_row)
+        topic_layout.addWidget(self.txt_topic_related)
+        topic_layout.addWidget(self.btn_apply_brand)
+        topic_layout.addWidget(self.list_topics)
+        topic_layout.addLayout(topic_buttons)
 
-        right_split = QSplitter(Qt.Vertical)
-        right_split.setSizes([420, 220])
-
-        top_right = QWidget()
-        top_layout = QVBoxLayout(top_right)
+        stop_group = QGroupBox("불용어 입력")
+        stop_layout = QVBoxLayout(stop_group)
         self.txt_stopwords = QTextEdit()
-        self.txt_stopwords.setPlaceholderText("불용어를 줄바꿈으로 입력")
+        self.txt_stopwords.setPlaceholderText("불용어를 줄바꿈/쉼표로 입력")
         opts_row = QHBoxLayout()
         self.chk_remove_numbers = QCheckBox("숫자 제거")
         self.chk_remove_symbols = QCheckBox("특수문자 제거")
@@ -334,21 +455,23 @@ class TextMiningApp(QMainWindow):
         opts_row.addWidget(self.chk_english_only)
         self.btn_apply_stopwords = QPushButton("불용어/옵션 적용")
         self.btn_apply_stopwords.clicked.connect(self.apply_stopwords)
+        stop_layout.addWidget(self.txt_stopwords)
+        stop_layout.addLayout(opts_row)
+        stop_layout.addWidget(self.btn_apply_stopwords)
 
-        top_layout.addWidget(self.txt_stopwords)
-        top_layout.addLayout(opts_row)
-        top_layout.addWidget(self.btn_apply_stopwords)
+        left_split.addWidget(topic_group)
+        left_split.addWidget(stop_group)
+        left_layout.addWidget(left_split)
 
         self.tbl_token_sample = QTableWidget()
         self.tbl_token_sample.setColumnCount(2)
         self.tbl_token_sample.setHorizontalHeaderLabels(["token", "count"])
         self.tbl_token_sample.horizontalHeader().setStretchLastSection(True)
-
-        right_split.addWidget(top_right)
-        right_split.addWidget(self.tbl_token_sample)
+        self.tbl_token_sample.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl_token_sample.customContextMenuRequested.connect(self.show_token_menu)
 
         splitter.addWidget(left)
-        splitter.addWidget(right_split)
+        splitter.addWidget(self.tbl_token_sample)
 
         self.tabs.addTab(tab, "텍스트마이닝 설정")
 
@@ -426,6 +549,8 @@ class TextMiningApp(QMainWindow):
         self.cb_weight_mode = QComboBox()
         self.cb_weight_mode.addItems(["count", "PMI"])
         self.cb_weight_mode.currentIndexChanged.connect(self.handle_pmi_guard)
+        self.chk_drag_mode = QCheckBox("노드 위치 편집")
+        self.chk_drag_mode.toggled.connect(self.redraw_network)
         self.lbl_advanced_hint = QLabel(
             "PMI는 희귀 단어쌍을 과대평가할 수 있어 min_node_count ≥ 10, "
             "min_edge_weight ≥ 5를 권장합니다. (데이터가 작을수록 필터를 높이세요)"
@@ -443,7 +568,8 @@ class TextMiningApp(QMainWindow):
         top_layout.addWidget(self.btn_reset_view, 1, 4)
         top_layout.addWidget(self.cb_cooc_scope, 2, 0, 1, 2)
         top_layout.addWidget(self.cb_weight_mode, 2, 2, 1, 2)
-        top_layout.addWidget(self.lbl_advanced_hint, 2, 4)
+        top_layout.addWidget(self.chk_drag_mode, 2, 4)
+        top_layout.addWidget(self.lbl_advanced_hint, 2, 5)
 
         splitter.addWidget(top)
 
@@ -459,6 +585,9 @@ class TextMiningApp(QMainWindow):
         bottom = QSplitter(Qt.Horizontal)
         bottom.setSizes([700, 500])
         self.network_canvas = ChartCanvas()
+        self.network_canvas.mpl_connect("button_press_event", self.on_network_press)
+        self.network_canvas.mpl_connect("button_release_event", self.on_network_release)
+        self.network_canvas.mpl_connect("motion_notify_event", self.on_network_motion)
         self.network_tabs = QTabWidget()
         self.tbl_edges = QTableWidget()
         self.tbl_edges.setColumnCount(3)
@@ -515,6 +644,9 @@ class TextMiningApp(QMainWindow):
 
         layout.addWidget(top)
 
+        content_split = QSplitter(Qt.Vertical)
+        content_split.setSizes([520, 200])
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.setSizes([720, 480])
         self.tbl_sent_records = QTableWidget()
@@ -531,7 +663,16 @@ class TextMiningApp(QMainWindow):
         self.sent_canvas = ChartCanvas()
         splitter.addWidget(self.tbl_sent_records)
         splitter.addWidget(self.sent_canvas)
-        layout.addWidget(splitter)
+
+        voc_group = QGroupBox("VoC 요약")
+        voc_layout = QVBoxLayout(voc_group)
+        self.txt_voc = QTextEdit()
+        self.txt_voc.setReadOnly(True)
+        voc_layout.addWidget(self.txt_voc)
+
+        content_split.addWidget(splitter)
+        content_split.addWidget(voc_group)
+        layout.addWidget(content_split)
 
         self.tabs.addTab(tab, "감성분석")
 
@@ -612,17 +753,24 @@ class TextMiningApp(QMainWindow):
 
     def populate_page_type_filters(self):
         self.list_page_type.clear()
+        self.cb_page_type_filter.blockSignals(True)
+        self.cb_page_type_filter.clear()
+        self.cb_page_type_filter.addItem("전체")
         if self.df_raw is None:
+            self.cb_page_type_filter.blockSignals(False)
             return
         mapping = self.map_columns(self.df_raw)
         page_col = mapping.get("page_type")
         if page_col is None:
+            self.cb_page_type_filter.blockSignals(False)
             return
         unique_vals = sorted({str(val) for val in self.df_raw[page_col].dropna().unique()})
         for val in unique_vals:
             item = QListWidgetItem(val)
             item.setCheckState(Qt.Unchecked)
             self.list_page_type.addItem(item)
+            self.cb_page_type_filter.addItem(val)
+        self.cb_page_type_filter.blockSignals(False)
 
     def select_all_page_types(self):
         for idx in range(self.list_page_type.count()):
@@ -704,19 +852,40 @@ class TextMiningApp(QMainWindow):
             self.tbl_preview.setItem(row_idx, 2, QTableWidgetItem(str(row.get("full_text", ""))))
 
     def format_date(self, value):
-        if isinstance(value, (datetime, pd.Timestamp)) and pd.notnull(value):
-            return value.strftime("%Y-%m-%d")
-        return ""
+        return safe_strftime(value)
 
     def apply_brand_dict(self):
-        self.brand_map = parse_brand_dictionary(self.txt_brand_dict.toPlainText())
+        topic_name = self.le_topic_name.text().strip()
+        related_raw = self.txt_topic_related.toPlainText()
+        related = [kw.strip() for kw in re.split(r"[,\n]", related_raw) if kw.strip()]
+        keywords = [kw for kw in related if kw]
+        if topic_name and keywords:
+            self.brand_map[topic_name] = keywords
+            self.le_topic_name.clear()
+            self.txt_topic_related.clear()
+        self.refresh_topic_list()
+        self.statusBar().showMessage("토픽 사전을 추가했습니다.")
+
+    def refresh_topic_list(self):
+        self.list_topics.clear()
+        for topic, keywords in self.brand_map.items():
+            self.list_topics.addItem(f"{topic}: {', '.join(keywords)}")
         self.cb_brand_filter.blockSignals(True)
         self.cb_brand_filter.clear()
         self.cb_brand_filter.addItem("전체")
         for brand in sorted(self.brand_map.keys()):
             self.cb_brand_filter.addItem(brand)
         self.cb_brand_filter.blockSignals(False)
-        self.statusBar().showMessage("브랜드 사전을 적용했습니다.")
+
+    def remove_selected_topic(self):
+        item = self.list_topics.currentItem()
+        if item is None:
+            return
+        text = item.text()
+        topic = text.split(":", 1)[0].strip()
+        if topic in self.brand_map:
+            self.brand_map.pop(topic)
+        self.refresh_topic_list()
 
     def split_sentiment_sentences(self, text: str):
         if not isinstance(text, str):
@@ -735,6 +904,44 @@ class TextMiningApp(QMainWindow):
                 continue
             sentences.append(sentence)
         return sentences
+
+    def update_sentiment_lexicon(self):
+        if self.senti_dict is None:
+            self.senti_dict = load_knu_dictionary(self)
+        self.senti_max_n = 1
+        for word in self.senti_dict.keys():
+            token_len = max(1, len(str(word).split()))
+            if token_len > self.senti_max_n:
+                self.senti_max_n = token_len
+
+    def match_sentiment_tokens(self, tokens):
+        if not tokens or not self.senti_dict:
+            return []
+        used = [False] * len(tokens)
+        matched = []
+        for n in range(self.senti_max_n, 0, -1):
+            if len(tokens) < n:
+                continue
+            idx = 0
+            while idx <= len(tokens) - n:
+                if any(used[idx : idx + n]):
+                    idx += 1
+                    continue
+                cand1 = "".join(tokens[idx : idx + n]).strip()
+                cand2 = " ".join(tokens[idx : idx + n]).strip()
+                hit = None
+                if cand1 in self.senti_dict:
+                    hit = cand1
+                elif cand2 in self.senti_dict:
+                    hit = cand2
+                if hit:
+                    matched.append(hit)
+                    for pos in range(idx, idx + n):
+                        used[pos] = True
+                    idx += n
+                else:
+                    idx += 1
+        return matched
 
     def bin_sentiment_score(self, raw_score: float) -> int:
         if raw_score <= -2:
@@ -767,7 +974,9 @@ class TextMiningApp(QMainWindow):
         return "전체"
 
     def apply_stopwords(self):
-        self.stopwords = {line.strip() for line in self.txt_stopwords.toPlainText().splitlines() if line.strip()}
+        raw = self.txt_stopwords.toPlainText()
+        tokens = [token.strip() for token in re.split(r"[,\n]", raw) if token.strip()]
+        self.stopwords = set(tokens)
         self.clean_opts = {
             "remove_numbers": self.chk_remove_numbers.isChecked(),
             "remove_symbols": self.chk_remove_symbols.isChecked(),
@@ -777,6 +986,36 @@ class TextMiningApp(QMainWindow):
         }
         self.statusBar().showMessage("불용어/옵션을 적용했습니다.")
         self.refresh_token_sample()
+
+    def show_token_menu(self, pos):
+        item = self.tbl_token_sample.itemAt(pos)
+        if item is None:
+            return
+        row = item.row()
+        token_item = self.tbl_token_sample.item(row, 0)
+        if token_item is None:
+            return
+        menu = QMenu(self)
+        action_delete = menu.addAction("단어 삭제(불용어 추가)")
+        action = menu.exec_(self.tbl_token_sample.viewport().mapToGlobal(pos))
+        if action == action_delete:
+            self.add_stopword_from_table(token_item.text())
+
+    def add_stopword_from_table(self, token: str):
+        token = token.strip()
+        if not token:
+            return
+        self.stopwords.add(token)
+        existing = set(re.split(r"[,\n]", self.txt_stopwords.toPlainText()))
+        if token not in existing:
+            current = self.txt_stopwords.toPlainText().strip()
+            updated = f"{current}\n{token}" if current else token
+            self.txt_stopwords.setPlainText(updated)
+        self.refresh_token_sample()
+        if self.word_freq_df is not None:
+            self.build_wordcloud()
+        if self.graph_full is not None:
+            self.build_network()
 
     def refresh_token_sample(self):
         if self.df_clean is None:
@@ -831,10 +1070,11 @@ class TextMiningApp(QMainWindow):
         else:
             df["bucket"] = df["date"].dt.to_period("Y").dt.start_time
 
+        selected_page = self.cb_page_type_filter.currentText()
+        if selected_page != "전체":
+            df = df[df["page_type"] == selected_page]
+
         if self.chk_split_by_page_type.isChecked():
-            topn = self.sb_topn_page_type.value()
-            top_pages = df["page_type"].value_counts().head(topn).index
-            df = df[df["page_type"].isin(top_pages)]
             summary = df.groupby(["bucket", "page_type"]).size().reset_index(name="count")
         else:
             summary = df.groupby("bucket").size().reset_index(name="count")
@@ -843,9 +1083,29 @@ class TextMiningApp(QMainWindow):
         summary = summary.sort_values("bucket")
         self.buzz_df = summary
 
+        metric = self.cb_buzz_metric.currentText()
         labels = [self.format_date(val) for val in summary["bucket"]]
-        values = summary["count"].tolist()
-        self.buzz_canvas.plot_line(labels, values, "버즈량", "count")
+        if self.chk_split_by_page_type.isChecked():
+            pivot = summary.pivot_table(
+                index="bucket", columns="page_type", values="count", fill_value=0
+            )
+            if metric == "%":
+                pivot = pivot.div(pivot.sum(axis=1).replace(0, 1), axis=0) * 100
+                ylabel = "%"
+            else:
+                ylabel = "count"
+            labels = [self.format_date(val) for val in pivot.index]
+            series = [(str(col), pivot[col].tolist()) for col in pivot.columns]
+            self.buzz_canvas.plot_stacked_bar(labels, series, "버즈량", ylabel)
+        else:
+            values = summary["count"].tolist()
+            if metric == "%":
+                total = sum(values) or 1
+                values = [round(val / total * 100, 2) for val in values]
+                ylabel = "%"
+            else:
+                ylabel = "count"
+            self.buzz_canvas.plot_bar(labels, values, "버즈량", ylabel)
         self.chart_images["buzz"] = self.save_chart(self.buzz_canvas, "buzz")
 
         self.tbl_buzz.setRowCount(len(summary))
@@ -868,7 +1128,13 @@ class TextMiningApp(QMainWindow):
         if freq.empty:
             self.lbl_wc_view.setText("데이터가 없습니다")
             return
-        wordcloud = WordCloud(width=800, height=500, background_color="white")
+        font_path = first_existing_path(DEFAULT_FONT_NAME)
+        wordcloud = WordCloud(
+            width=800,
+            height=500,
+            background_color="white",
+            font_path=str(font_path) if font_path else None,
+        )
         wc_img = wordcloud.generate_from_frequencies(freq.to_dict())
         wc_path = os.path.join(os.getcwd(), "wordcloud.png")
         wc_img.to_file(wc_path)
@@ -972,6 +1238,7 @@ class TextMiningApp(QMainWindow):
 
         self.graph_full = graph
         self.graph_view = graph.copy()
+        self.network_pos = None
         self.nodes_df = pd.DataFrame(
             [(node, graph.degree(node)) for node in graph.nodes], columns=["node", "degree"]
         )
@@ -1015,6 +1282,7 @@ class TextMiningApp(QMainWindow):
             nodes.update(nx.single_source_shortest_path_length(self.graph_full, seed, cutoff=hop).keys())
         subgraph = self.graph_full.subgraph(nodes).copy()
         self.graph_view = subgraph
+        self.network_pos = None
         self.nodes_view_df = pd.DataFrame(
             [(node, subgraph.degree(node)) for node in subgraph.nodes], columns=["node", "degree"]
         )
@@ -1030,24 +1298,64 @@ class TextMiningApp(QMainWindow):
         if self.graph_full is None:
             return
         self.graph_view = self.graph_full.copy()
+        self.network_pos = None
         self.nodes_view_df = self.nodes_df.copy()
         self.edges_view_df = self.edges_df.copy()
         self.draw_network(self.graph_view)
         self.populate_network_tables(self.edges_view_df, self.nodes_view_df)
         self.chart_images["network"] = self.save_chart(self.network_canvas, "network")
 
+    def redraw_network(self):
+        if self.graph_view is None:
+            return
+        self.draw_network(self.graph_view)
+
     def draw_network(self, graph):
         self.network_canvas.ax.clear()
         if graph is None or graph.number_of_nodes() == 0:
             self.network_canvas.draw()
             return
-        pos = nx.spring_layout(graph, k=0.6, seed=42)
+        if self.network_pos is None or set(self.network_pos.keys()) != set(graph.nodes):
+            self.network_pos = nx.spring_layout(graph, k=0.6, seed=42)
+        pos = self.network_pos
         nx.draw_networkx_nodes(graph, pos, ax=self.network_canvas.ax, node_size=200, node_color="#6baed6")
         nx.draw_networkx_edges(graph, pos, ax=self.network_canvas.ax, width=1.0, edge_color="#999999")
         nx.draw_networkx_labels(graph, pos, ax=self.network_canvas.ax, font_size=8)
         self.network_canvas.ax.set_title("네트워크")
         self.network_canvas.ax.axis("off")
         self.network_canvas.draw()
+
+    def on_network_press(self, event):
+        if not self.chk_drag_mode.isChecked():
+            return
+        if self.graph_view is None or event.inaxes != self.network_canvas.ax:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        closest = None
+        closest_dist = None
+        for node, (x_pos, y_pos) in self.network_pos.items():
+            dist = (x_pos - event.xdata) ** 2 + (y_pos - event.ydata) ** 2
+            if closest_dist is None or dist < closest_dist:
+                closest_dist = dist
+                closest = node
+        if closest_dist is not None and closest_dist < 0.02:
+            self.network_drag_node = closest
+
+    def on_network_motion(self, event):
+        if not self.chk_drag_mode.isChecked():
+            return
+        if self.network_drag_node is None or event.inaxes != self.network_canvas.ax:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        self.network_pos[self.network_drag_node] = (event.xdata, event.ydata)
+        self.draw_network(self.graph_view)
+
+    def on_network_release(self, event):
+        if not self.chk_drag_mode.isChecked():
+            return
+        self.network_drag_node = None
 
     def populate_network_tables(self, edges_df, nodes_df):
         self.tbl_edges.setRowCount(len(edges_df))
@@ -1064,15 +1372,15 @@ class TextMiningApp(QMainWindow):
     def run_sentiment(self):
         if self.df_clean is None:
             return
-        if self.senti_dict is None:
-            self.senti_dict = load_knu_dictionary()
+        self.update_sentiment_lexicon()
 
         records = []
         for _, row in self.df_clean.iterrows():
             text = row.get("full_text", "")
             for sentence in self.split_sentiment_sentences(text):
                 tokens = self.tokenize_text(sentence)
-                scores = [self.senti_dict.get(token, 0) for token in tokens if token]
+                matched = self.match_sentiment_tokens(tokens)
+                scores = [self.senti_dict.get(token, 0) for token in matched if token]
                 raw_score = sum(scores) / len(scores) if scores else 0
                 score = self.bin_sentiment_score(raw_score)
                 label = self.sentiment_score_label(score)
@@ -1085,6 +1393,7 @@ class TextMiningApp(QMainWindow):
                         "score": score,
                         "label": label,
                         "topic": topic,
+                        "matched_words": ", ".join(matched),
                     }
                 )
 
@@ -1115,13 +1424,38 @@ class TextMiningApp(QMainWindow):
             .reset_index(name="count")
         )
         self.sentiment_summary_df = summary
-        self.populate_sentiment_table(df)
-        chart_summary = df.groupby(["score", "label"]).size().reset_index(name="count")
+
+        if mode == "사전별 감성":
+            grouped = df.groupby(["topic", "page_type"])
+            summary_df = grouped["score"].agg(["count", "mean"]).reset_index()
+            summary_df["pos_pct"] = grouped.apply(
+                lambda sub: (sub["score"] > 0).mean() * 100
+            ).values
+            summary_df["neg_pct"] = grouped.apply(
+                lambda sub: (sub["score"] < 0).mean() * 100
+            ).values
+            summary_df = summary_df.rename(columns={"mean": "avg_score"})
+            self.populate_sentiment_summary_table(summary_df)
+            chart_summary = df.groupby(["score", "topic"]).size().reset_index(name="count")
+        else:
+            self.populate_sentiment_table(df)
+            chart_summary = df.groupby(["score", "label"]).size().reset_index(name="count")
+
         self.plot_sentiment_chart(chart_summary)
+        self.update_voc_summary(df)
 
     def populate_sentiment_table(self, df):
         show_records = df.head(200)
         self.tbl_sent_records.setRowCount(len(show_records))
+        self.tbl_sent_records.setColumnCount(6)
+        self.tbl_sent_records.setHorizontalHeaderLabels([
+            "date",
+            "page_type",
+            "sentence",
+            "score",
+            "label",
+            "topic",
+        ])
         for row_idx, (_, row) in enumerate(show_records.iterrows()):
             self.tbl_sent_records.setItem(row_idx, 0, QTableWidgetItem(self.format_date(row["date"])))
             self.tbl_sent_records.setItem(row_idx, 1, QTableWidgetItem(str(row["page_type"])))
@@ -1130,21 +1464,72 @@ class TextMiningApp(QMainWindow):
             self.tbl_sent_records.setItem(row_idx, 4, QTableWidgetItem(str(row["label"])))
             self.tbl_sent_records.setItem(row_idx, 5, QTableWidgetItem(str(row["topic"])))
 
+    def populate_sentiment_summary_table(self, summary_df):
+        self.tbl_sent_records.setRowCount(len(summary_df))
+        self.tbl_sent_records.setColumnCount(6)
+        self.tbl_sent_records.setHorizontalHeaderLabels([
+            "topic",
+            "page_type",
+            "avg_score",
+            "pos_pct",
+            "neg_pct",
+            "count",
+        ])
+        for row_idx, (_, row) in enumerate(summary_df.iterrows()):
+            self.tbl_sent_records.setItem(row_idx, 0, QTableWidgetItem(str(row["topic"])))
+            self.tbl_sent_records.setItem(row_idx, 1, QTableWidgetItem(str(row["page_type"])))
+            self.tbl_sent_records.setItem(row_idx, 2, QTableWidgetItem(f"{row['avg_score']:.2f}"))
+            self.tbl_sent_records.setItem(row_idx, 3, QTableWidgetItem(f"{row['pos_pct']:.2f}"))
+            self.tbl_sent_records.setItem(row_idx, 4, QTableWidgetItem(f"{row['neg_pct']:.2f}"))
+            self.tbl_sent_records.setItem(row_idx, 5, QTableWidgetItem(str(int(row["count"]))))
+
+    def update_voc_summary(self, df):
+        if df.empty:
+            self.txt_voc.clear()
+            return
+        voc_lines = []
+        for topic, sub in df.groupby("topic"):
+            voc_lines.append(f"[{topic}]")
+            positives = sub[sub["score"] > 0].head(3)
+            negatives = sub[sub["score"] < 0].head(3)
+            if not positives.empty:
+                voc_lines.append("긍정")
+                for _, row in positives.iterrows():
+                    voc_lines.append(f"- {row['sentence']} ({row.get('matched_words', '')})")
+            if not negatives.empty:
+                voc_lines.append("부정")
+                for _, row in negatives.iterrows():
+                    voc_lines.append(f"- {row['sentence']} ({row.get('matched_words', '')})")
+            voc_lines.append("")
+        self.txt_voc.setPlainText("\n".join(voc_lines))
+
     def plot_sentiment_chart(self, summary):
         metric = self.cb_sent_metric.currentText()
         score_order = [-2, -1, 0, 1, 2]
-        counts = {score: 0 for score in score_order}
-        for _, row in summary.iterrows():
-            counts[row["score"]] = int(row["count"])
-        values = [counts[score] for score in score_order]
-        if metric == "%":
-            total = sum(values) or 1
-            values = [round(value / total * 100, 2) for value in values]
-            ylabel = "%"
-        else:
-            ylabel = "count"
         labels = [str(score) for score in score_order]
-        self.sent_canvas.plot_bar(labels, values, "감성 분포", ylabel)
+        if "topic" in summary.columns:
+            pivot = summary.pivot_table(
+                index="score", columns="topic", values="count", fill_value=0
+            ).reindex(score_order, fill_value=0)
+            if metric == "%":
+                pivot = pivot.div(pivot.sum(axis=1).replace(0, 1), axis=0) * 100
+                ylabel = "%"
+            else:
+                ylabel = "count"
+            series = [(str(col), pivot[col].tolist()) for col in pivot.columns]
+            self.sent_canvas.plot_stacked_bar(labels, series, "감성 분포", ylabel)
+        else:
+            counts = {score: 0 for score in score_order}
+            for _, row in summary.iterrows():
+                counts[row["score"]] = int(row["count"])
+            values = [counts[score] for score in score_order]
+            if metric == "%":
+                total = sum(values) or 1
+                values = [round(value / total * 100, 2) for value in values]
+                ylabel = "%"
+            else:
+                ylabel = "count"
+            self.sent_canvas.plot_bar(labels, values, "감성 분포", ylabel)
         self.chart_images["sentiment"] = self.save_chart(self.sent_canvas, "sentiment")
 
     def choose_output_dir(self):
@@ -1218,13 +1603,17 @@ class TextMiningApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
 
-    font_path = resource_path("Pretendard-Medium.otf")
-    if os.path.exists(font_path):
-        font_id = QFontDatabase.addApplicationFont(font_path)
+    font_path = first_existing_path(DEFAULT_FONT_NAME)
+    if font_path:
+        font_id = QFontDatabase.addApplicationFont(str(font_path))
         if font_id != -1:
             families = QFontDatabase.applicationFontFamilies(font_id)
             if families:
                 app.setFont(QFont(families[0], 10))
+        fm.fontManager.addfont(str(font_path))
+        font_name = fm.FontProperties(fname=str(font_path)).get_name()
+        plt.rcParams["font.family"] = font_name
+        plt.rcParams["axes.unicode_minus"] = False
 
     window = TextMiningApp()
     window.show()
