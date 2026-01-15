@@ -51,6 +51,14 @@ KNU_DICT_URL = "https://raw.githubusercontent.com/park1200656/KnuSentiLex/master
 DEFAULT_RESOURCE_DIR = Path(r"C:\Users\70089004\text_file")
 DEFAULT_FONT_NAME = "Pretendard-Medium.otf"
 DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
+FALLBACK_FONT_NAMES = [
+    "Pretendard",
+    "Malgun Gothic",
+    "AppleGothic",
+    "NanumGothic",
+    "Noto Sans CJK KR",
+    "Noto Sans KR",
+]
 
 
 def resource_path(rel_path: str) -> str:
@@ -71,6 +79,25 @@ def first_existing_path(filename: str) -> Path | None:
         if path.exists():
             return path
     return None
+
+
+def resolve_font_path() -> str | None:
+    font_path = first_existing_path(DEFAULT_FONT_NAME)
+    if font_path:
+        return str(font_path)
+    for font in fm.fontManager.ttflist:
+        if font.name in FALLBACK_FONT_NAMES:
+            return font.fname
+    return None
+
+
+def configure_matplotlib_font(font_path: str | None):
+    if not font_path:
+        return
+    fm.fontManager.addfont(font_path)
+    font_name = fm.FontProperties(fname=font_path).get_name()
+    plt.rcParams["font.family"] = font_name
+    plt.rcParams["axes.unicode_minus"] = False
 
 
 def parse_sentiment_entries(entries):
@@ -274,6 +301,7 @@ class TextMiningApp(QMainWindow):
         self.senti_dict = None
         self.senti_max_n = 1
         self.kiwi = Kiwi()
+        self.font_path = resolve_font_path()
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -425,11 +453,17 @@ class TextMiningApp(QMainWindow):
         self.txt_topic_related.setFixedHeight(90)
         self.btn_apply_brand = QPushButton("토픽 추가")
         self.btn_apply_brand.clicked.connect(self.apply_brand_dict)
+        self.btn_save_topics = QPushButton("토픽 저장")
+        self.btn_save_topics.clicked.connect(self.save_topic_dictionary)
+        self.btn_load_topics = QPushButton("토픽 불러오기")
+        self.btn_load_topics.clicked.connect(self.load_topic_dictionary)
         self.list_topics = QListWidget()
         self.list_topics.setMinimumHeight(120)
         topic_buttons = QHBoxLayout()
         self.btn_remove_topic = QPushButton("선택 토픽 삭제")
         self.btn_remove_topic.clicked.connect(self.remove_selected_topic)
+        topic_buttons.addWidget(self.btn_save_topics)
+        topic_buttons.addWidget(self.btn_load_topics)
         topic_buttons.addStretch()
         topic_buttons.addWidget(self.btn_remove_topic)
         topic_layout.addLayout(topic_row)
@@ -895,6 +929,53 @@ class TextMiningApp(QMainWindow):
             self.brand_map.pop(topic)
         self.refresh_topic_list()
 
+    def save_topic_dictionary(self):
+        if not self.brand_map:
+            self.statusBar().showMessage("저장할 토픽이 없습니다.")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "토픽 사전 저장",
+            "",
+            "JSON Files (*.json);;Text Files (*.txt)",
+        )
+        if not file_path:
+            return
+        if file_path.endswith(".txt"):
+            lines = [f"{topic}:{', '.join(words)}" for topic, words in self.brand_map.items()]
+            payload = "\n".join(lines)
+        else:
+            payload = json.dumps(self.brand_map, ensure_ascii=False, indent=2)
+        with open(file_path, "w", encoding="utf-8") as file:
+            file.write(payload)
+        self.statusBar().showMessage(f"토픽 사전 저장 완료: {file_path}")
+
+    def load_topic_dictionary(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "토픽 사전 불러오기",
+            "",
+            "JSON Files (*.json);;Text Files (*.txt);;All Files (*)",
+        )
+        if not file_path:
+            return
+        with open(file_path, "r", encoding="utf-8") as file:
+            content = file.read()
+        loaded = {}
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict):
+                loaded = {str(k): list(v) for k, v in data.items()}
+        except json.JSONDecodeError:
+            loaded = parse_brand_dictionary(content)
+        if not loaded:
+            self.statusBar().showMessage("토픽 사전을 불러오지 못했습니다.")
+            return
+        for topic, keywords in loaded.items():
+            self.brand_map[topic] = [kw for kw in keywords if kw]
+        self.refresh_topic_list()
+        self.statusBar().showMessage(f"토픽 사전 불러오기 완료: {len(loaded)}개")
+
     def split_sentiment_sentences(self, text: str):
         if not isinstance(text, str):
             return []
@@ -1145,7 +1226,7 @@ class TextMiningApp(QMainWindow):
         if freq.empty:
             self.lbl_wc_view.setText("데이터가 없습니다")
             return
-        font_path = first_existing_path(DEFAULT_FONT_NAME)
+        font_path = self.font_path
         wordcloud = WordCloud(
             width=800,
             height=500,
@@ -1655,17 +1736,14 @@ class TextMiningApp(QMainWindow):
 def main():
     app = QApplication(sys.argv)
 
-    font_path = first_existing_path(DEFAULT_FONT_NAME)
+    font_path = resolve_font_path()
     if font_path:
         font_id = QFontDatabase.addApplicationFont(str(font_path))
         if font_id != -1:
             families = QFontDatabase.applicationFontFamilies(font_id)
             if families:
                 app.setFont(QFont(families[0], 10))
-        fm.fontManager.addfont(str(font_path))
-        font_name = fm.FontProperties(fname=str(font_path)).get_name()
-        plt.rcParams["font.family"] = font_name
-        plt.rcParams["axes.unicode_minus"] = False
+    configure_matplotlib_font(font_path)
 
     window = TextMiningApp()
     window.show()
