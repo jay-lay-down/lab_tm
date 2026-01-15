@@ -419,17 +419,24 @@ class TextMiningApp(QMainWindow):
         topic_row = QHBoxLayout()
         self.le_topic_name = QLineEdit()
         self.le_topic_name.setPlaceholderText("핵심 키워드 1")
-        self.le_topic_keyword = QLineEdit()
-        self.le_topic_keyword.setPlaceholderText("키워드 입력")
         topic_row.addWidget(self.le_topic_name)
-        topic_row.addWidget(self.le_topic_keyword)
         self.txt_topic_related = QTextEdit()
         self.txt_topic_related.setPlaceholderText("관련어를 입력하세요 (쉼표/줄바꿈 구분)")
-        self.btn_apply_brand = QPushButton("토픽 적용")
+        self.txt_topic_related.setFixedHeight(90)
+        self.btn_apply_brand = QPushButton("토픽 추가")
         self.btn_apply_brand.clicked.connect(self.apply_brand_dict)
+        self.list_topics = QListWidget()
+        self.list_topics.setMinimumHeight(120)
+        topic_buttons = QHBoxLayout()
+        self.btn_remove_topic = QPushButton("선택 토픽 삭제")
+        self.btn_remove_topic.clicked.connect(self.remove_selected_topic)
+        topic_buttons.addStretch()
+        topic_buttons.addWidget(self.btn_remove_topic)
         topic_layout.addLayout(topic_row)
         topic_layout.addWidget(self.txt_topic_related)
         topic_layout.addWidget(self.btn_apply_brand)
+        topic_layout.addWidget(self.list_topics)
+        topic_layout.addLayout(topic_buttons)
 
         stop_group = QGroupBox("불용어 입력")
         stop_layout = QVBoxLayout(stop_group)
@@ -849,23 +856,36 @@ class TextMiningApp(QMainWindow):
 
     def apply_brand_dict(self):
         topic_name = self.le_topic_name.text().strip()
-        keyword_main = self.le_topic_keyword.text().strip()
         related_raw = self.txt_topic_related.toPlainText()
         related = [kw.strip() for kw in re.split(r"[,\n]", related_raw) if kw.strip()]
-        keywords = [kw for kw in [keyword_main, *related] if kw]
-        if not topic_name and keywords:
-            topic_name = keywords[0]
+        keywords = [kw for kw in related if kw]
         if topic_name and keywords:
-            self.brand_map = {topic_name: keywords}
-        else:
-            self.brand_map = {}
+            self.brand_map[topic_name] = keywords
+            self.le_topic_name.clear()
+            self.txt_topic_related.clear()
+        self.refresh_topic_list()
+        self.statusBar().showMessage("토픽 사전을 추가했습니다.")
+
+    def refresh_topic_list(self):
+        self.list_topics.clear()
+        for topic, keywords in self.brand_map.items():
+            self.list_topics.addItem(f"{topic}: {', '.join(keywords)}")
         self.cb_brand_filter.blockSignals(True)
         self.cb_brand_filter.clear()
         self.cb_brand_filter.addItem("전체")
         for brand in sorted(self.brand_map.keys()):
             self.cb_brand_filter.addItem(brand)
         self.cb_brand_filter.blockSignals(False)
-        self.statusBar().showMessage("토픽 사전을 적용했습니다.")
+
+    def remove_selected_topic(self):
+        item = self.list_topics.currentItem()
+        if item is None:
+            return
+        text = item.text()
+        topic = text.split(":", 1)[0].strip()
+        if topic in self.brand_map:
+            self.brand_map.pop(topic)
+        self.refresh_topic_list()
 
     def split_sentiment_sentences(self, text: str):
         if not isinstance(text, str):
