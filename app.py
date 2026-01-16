@@ -1,3 +1,4 @@
+import importlib.util
 import itertools
 import json
 import os
@@ -56,6 +57,11 @@ from PyQt5.QtWidgets import (
 )
 from wordcloud import WordCloud
 
+if getattr(sys, "_MEIPASS", None):
+    bundled_nltk_path = Path(sys._MEIPASS) / "nltk_data"
+    if bundled_nltk_path.exists() and str(bundled_nltk_path) not in nltk.data.path:
+        nltk.data.path.insert(0, str(bundled_nltk_path))
+
 matplotlib.use("Qt5Agg")
 
 KNU_DICT_URL = "https://raw.githubusercontent.com/park1200656/KnuSentiLex/master/data/SentiWord_info.json"
@@ -65,6 +71,7 @@ DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
 DEFAULT_EN_SENTI_NAME = "SentiWord_EN.txt"
 DEFAULT_NETWORK_FONT_NAME = "malgun.ttf"
 DEFAULT_NLTK_DATA_DIR = "nltk_data"
+DEFAULT_ARGOS_MODELS_DIR = "argos_models"
 PERIOD_ALL_LABEL = "전체 기간"
 FALLBACK_FONT_NAMES = [
     "Pretendard",
@@ -141,6 +148,23 @@ QUOTE_TRANSLATION = str.maketrans(
     }
 )
 EN_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+DEFAULT_COUNTRY_LANG_MAP = {
+    "KR": "ko",
+    "CN": "zh",
+    "JP": "ja",
+    "IN": "hi",
+    "FR": "fr",
+    "VN": "vi",
+    "TH": "th",
+    "ES": "es",
+    "IT": "it",
+    "SA": "ar",
+    "AE": "ar",
+    "EG": "ar",
+    "US": "en",
+    "GB": "en",
+}
+SUPPORTED_LANG_CODES = {"ko", "en", "zh", "ja", "hi", "fr", "vi", "th", "es", "it", "ar"}
 
 
 def resource_path(rel_path: str) -> str:
@@ -667,6 +691,12 @@ class TextMiningApp(QMainWindow):
         self.last_wc_topn = []
         self.last_wc_topn_value = 0
         self.last_nodes_ranked = []
+        self.base_language = "ko"
+        self.language_column = None
+        self.language_filter_active = False
+        self.language_filter_values = set()
+        self.country_language_map = DEFAULT_COUNTRY_LANG_MAP.copy()
+        self.text_column = "full_text"
 
         self.senti_dict = None
         self.senti_max_n = 1
@@ -702,6 +732,7 @@ class TextMiningApp(QMainWindow):
 
         self.update_gate_state()
         self.apply_primary_button_styles()
+        self.sync_sentiment_language_controls()
 
     def apply_primary_button_styles(self):
         style = "QPushButton { background-color: #1e88e5; color: white; }"
@@ -725,8 +756,8 @@ class TextMiningApp(QMainWindow):
         main_layout.addWidget(splitter)
 
         top = QWidget()
-        top.setMinimumHeight(160)
-        top.setMaximumHeight(220)
+        top.setMinimumHeight(260)
+        top.setMaximumHeight(360)
         top_layout = QGridLayout(top)
 
         self.btn_open_excel = QPushButton("엑셀 파일 열기")
@@ -764,8 +795,48 @@ class TextMiningApp(QMainWindow):
         kw_layout.addWidget(self.le_exclude_keywords)
         kw_layout.addWidget(self.lbl_exclude_hint)
 
+        self.group_language_filter = QGroupBox("기본 언어/언어 필터/번역")
+        lang_layout = QGridLayout(self.group_language_filter)
+        self.rb_base_lang_ko = QRadioButton("Korean (ko)")
+        self.rb_base_lang_en = QRadioButton("English (en)")
+        self.rb_base_lang_ko.setChecked(True)
+        self.rb_base_lang_ko.toggled.connect(self.handle_base_language_change)
+        self.rb_base_lang_en.toggled.connect(self.handle_base_language_change)
+        self.cb_language_column = QComboBox()
+        self.cb_language_column.addItems(["None"])
+        self.cb_language_column.currentIndexChanged.connect(self.update_language_value_list)
+        self.btn_edit_lang_map = QPushButton("매핑 테이블 편집")
+        self.btn_edit_lang_map.clicked.connect(self.edit_language_mapping)
+        self.list_language_values = QListWidget()
+        self.list_language_values.itemChanged.connect(self.apply_language_filter_preview)
+        self.btn_lang_select_all = QPushButton("전체선택")
+        self.btn_lang_clear = QPushButton("전체해제")
+        self.btn_lang_select_all.clicked.connect(self.select_all_languages)
+        self.btn_lang_clear.clicked.connect(self.clear_all_languages)
+        self.chk_lang_filter_active = QCheckBox("선택값만 보기(Filter)")
+        self.chk_lang_filter_active.stateChanged.connect(self.apply_language_filter_preview)
+        self.lbl_lang_values = QLabel("유니크 값: -")
+        self.btn_translate_selected = QPushButton("Translate selected languages → English (offline)")
+        self.btn_translate_selected.clicked.connect(self.translate_selected_languages)
+        self.chk_translate_overwrite = QCheckBox("Full Text 덮어쓰기")
+
+        lang_layout.addWidget(QLabel("Base Language"), 0, 0)
+        lang_layout.addWidget(self.rb_base_lang_ko, 0, 1)
+        lang_layout.addWidget(self.rb_base_lang_en, 0, 2)
+        lang_layout.addWidget(QLabel("Language column"), 1, 0)
+        lang_layout.addWidget(self.cb_language_column, 1, 1)
+        lang_layout.addWidget(self.btn_edit_lang_map, 1, 2)
+        lang_layout.addWidget(self.lbl_lang_values, 2, 0, 1, 3)
+        lang_layout.addWidget(self.list_language_values, 3, 0, 2, 3)
+        lang_layout.addWidget(self.btn_lang_select_all, 5, 0)
+        lang_layout.addWidget(self.btn_lang_clear, 5, 1)
+        lang_layout.addWidget(self.chk_lang_filter_active, 5, 2)
+        lang_layout.addWidget(self.btn_translate_selected, 6, 0, 1, 2)
+        lang_layout.addWidget(self.chk_translate_overwrite, 6, 2)
+
         top_layout.addWidget(self.group_page_type_filter, 2, 0, 2, 2)
         top_layout.addWidget(self.group_keyword_filter, 2, 2, 2, 3)
+        top_layout.addWidget(self.group_language_filter, 4, 0, 2, 5)
 
         splitter.addWidget(top)
 
@@ -793,9 +864,12 @@ class TextMiningApp(QMainWindow):
                 self.cb_buzz_period_unit, self.cb_buzz_period_value, self.df_clean
             )
         )
-        self.chk_split_by_page_type = QCheckBox("page_type 분리")
-        self.cb_page_type_filter = QComboBox()
-        self.cb_page_type_filter.addItem("전체")
+        self.chk_split_by_group = QCheckBox("그룹 분리")
+        self.cb_group_by = QComboBox()
+        self.cb_group_by.addItem("page_type")
+        self.cb_group_by.currentIndexChanged.connect(self.update_group_filter_values)
+        self.cb_group_filter = QComboBox()
+        self.cb_group_filter.addItem("전체")
         self.cb_buzz_metric = QComboBox()
         self.cb_buzz_metric.addItems(["n", "%"])
         self.btn_refresh_buzz = QPushButton("버즈 계산")
@@ -805,12 +879,14 @@ class TextMiningApp(QMainWindow):
         top_layout.addWidget(self.cb_granularity, 0, 1)
         top_layout.addWidget(QLabel("기간 선택"), 0, 2)
         top_layout.addWidget(self.cb_buzz_period_value, 0, 3)
-        top_layout.addWidget(self.chk_split_by_page_type, 0, 4)
-        top_layout.addWidget(QLabel("page_type"), 0, 5)
-        top_layout.addWidget(self.cb_page_type_filter, 0, 6)
-        top_layout.addWidget(QLabel("지표"), 0, 7)
-        top_layout.addWidget(self.cb_buzz_metric, 0, 8)
-        top_layout.addWidget(self.btn_refresh_buzz, 0, 9)
+        top_layout.addWidget(self.chk_split_by_group, 0, 4)
+        top_layout.addWidget(QLabel("Group by"), 0, 5)
+        top_layout.addWidget(self.cb_group_by, 0, 6)
+        top_layout.addWidget(QLabel("필터"), 0, 7)
+        top_layout.addWidget(self.cb_group_filter, 0, 8)
+        top_layout.addWidget(QLabel("지표"), 0, 9)
+        top_layout.addWidget(self.cb_buzz_metric, 0, 10)
+        top_layout.addWidget(self.btn_refresh_buzz, 0, 11)
 
         layout.addWidget(top)
 
@@ -1297,16 +1373,13 @@ class TextMiningApp(QMainWindow):
         self.cb_sent_metric.currentIndexChanged.connect(self.update_sentiment_view)
         self.cb_sentence_split = QComboBox()
         self.cb_sentence_split.addItems(["기본", "강함(쉼표 포함)"])
-        self.rb_sent_lang_auto = QRadioButton("자동")
         self.rb_sent_lang_ko = QRadioButton("한국어")
         self.rb_sent_lang_en = QRadioButton("영어")
-        self.rb_sent_lang_auto.setChecked(True)
-        for rb in [self.rb_sent_lang_auto, self.rb_sent_lang_ko, self.rb_sent_lang_en]:
+        for rb in [self.rb_sent_lang_ko, self.rb_sent_lang_en]:
             rb.toggled.connect(self.handle_sentiment_language_change)
-        self.group_sent_lang = QGroupBox("언어")
+        self.group_sent_lang = QGroupBox("기본 언어(데이터 로드)")
         lang_layout = QHBoxLayout(self.group_sent_lang)
         lang_layout.setContentsMargins(6, 4, 6, 4)
-        lang_layout.addWidget(self.rb_sent_lang_auto)
         lang_layout.addWidget(self.rb_sent_lang_ko)
         lang_layout.addWidget(self.rb_sent_lang_en)
         self.cb_brand_filter = QComboBox()
@@ -1614,6 +1687,8 @@ class TextMiningApp(QMainWindow):
         self.df_raw = pd.read_excel(file_path)
         self.lbl_file_path.setText(file_path)
         self.populate_page_type_filters()
+        self.populate_language_column_options()
+        self.update_language_value_list()
         self.update_mapping_status()
         self.update_preview(self.df_raw)
 
@@ -1630,25 +1705,18 @@ class TextMiningApp(QMainWindow):
 
     def populate_page_type_filters(self):
         self.list_page_type.clear()
-        self.cb_page_type_filter.blockSignals(True)
-        self.cb_page_type_filter.clear()
-        self.cb_page_type_filter.addItem("전체")
         self.populate_sentiment_page_type_filter()
         if self.df_raw is None:
-            self.cb_page_type_filter.blockSignals(False)
             return
         mapping = self.map_columns(self.df_raw)
         page_col = mapping.get("page_type")
         if page_col is None:
-            self.cb_page_type_filter.blockSignals(False)
             return
         unique_vals = sorted({str(val) for val in self.df_raw[page_col].dropna().unique()})
         for val in unique_vals:
             item = QListWidgetItem(val)
             item.setCheckState(Qt.Unchecked)
             self.list_page_type.addItem(item)
-            self.cb_page_type_filter.addItem(val)
-        self.cb_page_type_filter.blockSignals(False)
         self.populate_sentiment_page_type_filter()
 
     def populate_sentiment_page_type_filter(self):
@@ -1664,6 +1732,57 @@ class TextMiningApp(QMainWindow):
                 self.cb_sent_page_type.addItem(val)
         self.cb_sent_page_type.blockSignals(False)
 
+    def populate_group_by_options(self):
+        if not hasattr(self, "cb_group_by"):
+            return
+        source_df = self.df_clean if self.df_clean is not None else self.df_raw
+        self.cb_group_by.blockSignals(True)
+        self.cb_group_filter.blockSignals(True)
+        self.cb_group_by.clear()
+        self.cb_group_filter.clear()
+        self.cb_group_filter.addItem("전체")
+        if source_df is None:
+            self.cb_group_by.addItem("page_type")
+            self.cb_group_by.blockSignals(False)
+            self.cb_group_filter.blockSignals(False)
+            return
+        excluded = {"date", "full_text", "full_text_en"}
+        candidates = [col for col in source_df.columns if col not in excluded]
+        if not candidates:
+            candidates = ["page_type"]
+        for col in candidates:
+            self.cb_group_by.addItem(str(col))
+        self.cb_group_by.blockSignals(False)
+        self.cb_group_filter.blockSignals(False)
+        self.update_group_filter_values()
+
+    def update_group_filter_values(self):
+        if not hasattr(self, "cb_group_filter") or self.df_clean is None:
+            return
+        group_col = self.cb_group_by.currentText()
+        self.cb_group_filter.blockSignals(True)
+        self.cb_group_filter.clear()
+        self.cb_group_filter.addItem("전체")
+        if group_col and group_col in self.df_clean.columns:
+            unique_vals = sorted({str(val) for val in self.df_clean[group_col].dropna().unique()})
+            for val in unique_vals:
+                self.cb_group_filter.addItem(val)
+        self.cb_group_filter.blockSignals(False)
+
+    def populate_language_column_options(self):
+        self.cb_language_column.blockSignals(True)
+        current = self.cb_language_column.currentText()
+        self.cb_language_column.clear()
+        self.cb_language_column.addItem("None")
+        if self.df_raw is not None:
+            for col in self.df_raw.columns:
+                self.cb_language_column.addItem(str(col))
+        if current:
+            index = self.cb_language_column.findText(current)
+            if index >= 0:
+                self.cb_language_column.setCurrentIndex(index)
+        self.cb_language_column.blockSignals(False)
+
     def select_all_page_types(self):
         for idx in range(self.list_page_type.count()):
             self.list_page_type.item(idx).setCheckState(Qt.Checked)
@@ -1671,6 +1790,220 @@ class TextMiningApp(QMainWindow):
     def clear_all_page_types(self):
         for idx in range(self.list_page_type.count()):
             self.list_page_type.item(idx).setCheckState(Qt.Unchecked)
+
+    def handle_base_language_change(self):
+        self.base_language = "ko" if self.rb_base_lang_ko.isChecked() else "en"
+        self.sync_sentiment_language_controls()
+        self.update_active_text_column()
+        if self.df_clean is not None:
+            self.update_preview(self.df_clean)
+
+    def sync_sentiment_language_controls(self):
+        if not hasattr(self, "rb_sent_lang_ko"):
+            return
+        self.rb_sent_lang_ko.blockSignals(True)
+        self.rb_sent_lang_en.blockSignals(True)
+        self.rb_sent_lang_ko.setChecked(self.base_language == "ko")
+        self.rb_sent_lang_en.setChecked(self.base_language == "en")
+        self.rb_sent_lang_ko.blockSignals(False)
+        self.rb_sent_lang_en.blockSignals(False)
+        self.group_sent_lang.setEnabled(False)
+
+    def update_language_value_list(self):
+        self.list_language_values.blockSignals(True)
+        self.list_language_values.clear()
+        self.language_column = self.get_language_column()
+        if self.df_raw is None or self.language_column is None:
+            self.lbl_lang_values.setText("유니크 값: -")
+            self.list_language_values.blockSignals(False)
+            return
+        unique_vals = sorted({str(val) for val in self.df_raw[self.language_column].dropna().unique()})
+        for val in unique_vals:
+            item = QListWidgetItem(val)
+            item.setCheckState(Qt.Unchecked)
+            self.list_language_values.addItem(item)
+        self.lbl_lang_values.setText(f"유니크 값: {len(unique_vals)}")
+        self.list_language_values.blockSignals(False)
+        self.apply_language_filter_preview()
+
+    def select_all_languages(self):
+        for idx in range(self.list_language_values.count()):
+            self.list_language_values.item(idx).setCheckState(Qt.Checked)
+        self.apply_language_filter_preview()
+
+    def clear_all_languages(self):
+        for idx in range(self.list_language_values.count()):
+            self.list_language_values.item(idx).setCheckState(Qt.Unchecked)
+        self.apply_language_filter_preview()
+
+    def apply_language_filter_preview(self):
+        self.language_filter_active = self.chk_lang_filter_active.isChecked()
+        self.language_filter_values = self.get_selected_language_values()
+        if self.df_raw is not None:
+            self.update_preview(self.df_raw)
+
+    def get_selected_language_values(self) -> set[str]:
+        selected = set()
+        for idx in range(self.list_language_values.count()):
+            item = self.list_language_values.item(idx)
+            if item.checkState() == Qt.Checked:
+                selected.add(item.text())
+        return selected
+
+    def get_language_column(self) -> str | None:
+        if not hasattr(self, "cb_language_column"):
+            return None
+        col = self.cb_language_column.currentText()
+        return None if col == "None" else col
+
+    def edit_language_mapping(self):
+        current = json.dumps(self.country_language_map, ensure_ascii=False, indent=2)
+        text, ok = QInputDialog.getMultiLineText(
+            self, "Country → Language 매핑 편집", "JSON 형식으로 입력하세요:", current
+        )
+        if not ok:
+            return
+        try:
+            updated = json.loads(text)
+        except json.JSONDecodeError:
+            QMessageBox.warning(self, "형식 오류", "JSON 형식이 올바르지 않습니다.")
+            return
+        if not isinstance(updated, dict):
+            QMessageBox.warning(self, "형식 오류", "JSON 객체(dict) 형태로 입력해주세요.")
+            return
+        self.country_language_map = {str(k).upper(): str(v).lower() for k, v in updated.items()}
+        self.statusBar().showMessage("매핑 테이블을 업데이트했습니다.")
+
+    def normalize_language_value(self, value: str) -> str | None:
+        if value is None:
+            return None
+        value = str(value).strip()
+        if not value:
+            return None
+        for sep in ["-", "_"]:
+            if sep in value:
+                value = value.split(sep, 1)[0]
+        if value.lower() in SUPPORTED_LANG_CODES:
+            return value.lower()
+        upper = value.upper()
+        if upper in self.country_language_map:
+            return self.country_language_map[upper]
+        lower = value.lower()
+        if lower in SUPPORTED_LANG_CODES:
+            return lower
+        return None
+
+    def apply_language_filter(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df is None or self.language_column is None:
+            return df
+        if not self.language_filter_active or not self.language_filter_values:
+            return df
+        return df[df[self.language_column].astype(str).isin(self.language_filter_values)]
+
+    def update_active_text_column(self):
+        if self.base_language == "en" and self.df_clean is not None:
+            if "full_text_en" in self.df_clean.columns:
+                self.text_column = "full_text_en"
+                return
+        self.text_column = "full_text"
+
+    def get_analysis_text_column(self, df: pd.DataFrame) -> str:
+        if df is not None and self.text_column in df.columns:
+            return self.text_column
+        return "full_text"
+
+    def get_argos_model_paths(self) -> list[Path]:
+        return [
+            Path(resource_path(DEFAULT_ARGOS_MODELS_DIR)),
+            DEFAULT_RESOURCE_DIR / DEFAULT_ARGOS_MODELS_DIR,
+            Path(__file__).resolve().parent / DEFAULT_ARGOS_MODELS_DIR,
+        ]
+
+    def find_argos_model_path(self, source_lang: str, target_lang: str = "en") -> Path | None:
+        pattern = f"{source_lang}_{target_lang}"
+        for base_dir in self.get_argos_model_paths():
+            if not base_dir.exists():
+                continue
+            for path in base_dir.glob("*.argosmodel"):
+                if pattern in path.stem:
+                    return path
+        return None
+
+    def translate_selected_languages(self):
+        if self.df_clean is None:
+            self.statusBar().showMessage("전처리 적용 후 번역을 실행해주세요.")
+            return
+        if importlib.util.find_spec("argostranslate") is None:
+            QMessageBox.warning(self, "번역 엔진 없음", "Argos Translate가 설치되어 있지 않습니다.")
+            return
+        from argostranslate import package as argos_package
+        from argostranslate import translate as argos_translate
+
+        self.language_column = self.get_language_column()
+        if self.language_column is None:
+            QMessageBox.warning(self, "언어 컬럼 없음", "Language column을 선택해주세요.")
+            return
+        selected_values = self.get_selected_language_values()
+        if not selected_values:
+            QMessageBox.warning(self, "선택 없음", "번역할 언어 값을 선택해주세요.")
+            return
+
+        value_to_lang = {
+            value: self.normalize_language_value(value) for value in selected_values
+        }
+        missing = [val for val, code in value_to_lang.items() if code is None]
+        if missing:
+            QMessageBox.warning(
+                self,
+                "매핑 실패",
+                f"언어 코드로 매핑되지 않은 값: {', '.join(missing)}",
+            )
+        value_to_lang = {val: code for val, code in value_to_lang.items() if code}
+        if not value_to_lang:
+            return
+
+        translators = {}
+        for code in set(value_to_lang.values()):
+            if code == "en":
+                continue
+            model_path = self.find_argos_model_path(code, "en")
+            if model_path is None:
+                QMessageBox.warning(
+                    self,
+                    "모델 누락",
+                    f"{code} → en 모델을 찾을 수 없습니다.\n"
+                    f"폴더: {', '.join(str(p) for p in self.get_argos_model_paths())}",
+                )
+                return
+            argos_package.install_from_path(str(model_path))
+            translator = argos_translate.get_translation_from_codes(code, "en")
+            if translator is None:
+                QMessageBox.warning(self, "번역기 초기화 실패", f"{code} → en 번역기 생성 실패")
+                return
+            translators[code] = translator
+
+        df = self.df_clean.copy()
+        target_col = "full_text" if self.chk_translate_overwrite.isChecked() else "full_text_en"
+        if target_col not in df.columns:
+            df[target_col] = df["full_text"]
+        mask = df[self.language_column].astype(str).isin(selected_values)
+        subset = df.loc[mask, ["full_text", self.language_column]]
+
+        translated_texts = []
+        for _, row in subset.iterrows():
+            lang_code = value_to_lang.get(str(row[self.language_column]))
+            text = row["full_text"]
+            if lang_code == "en" or not isinstance(text, str):
+                translated_texts.append(text)
+                continue
+            translator = translators.get(lang_code)
+            translated_texts.append(translator.translate(text) if translator else text)
+
+        df.loc[mask, target_col] = translated_texts
+        self.df_clean = df
+        self.update_active_text_column()
+        self.update_preview(self.df_clean)
+        self.statusBar().showMessage("선택한 언어 번역을 완료했습니다.")
 
     def map_columns(self, df):
         normalized = {normalize_column_name(col): col for col in df.columns}
@@ -1707,8 +2040,8 @@ class TextMiningApp(QMainWindow):
         if missing:
             self.statusBar().showMessage(f"필수 컬럼 누락: {', '.join(missing)}")
             return
-        df = self.df_raw.copy()
-        df_mapped = pd.DataFrame()
+        df = self.apply_language_filter(self.df_raw.copy())
+        df_mapped = df.copy()
         df_mapped["date"] = pd.to_datetime(df[mapping["date"]], errors="coerce").dt.normalize()
         df_mapped["page_type"] = df[mapping["page_type"]].astype(str)
         df_mapped["full_text"] = df[mapping["full_text"]].astype(str)
@@ -1730,19 +2063,43 @@ class TextMiningApp(QMainWindow):
                 )
                 df_mapped = df_mapped[~mask]
 
-        self.df_clean = df_mapped[["date", "page_type", "full_text"]]
+        self.df_clean = df_mapped
         self.lbl_rows.setText(f"원본 {len(self.df_raw)} → 현재 {len(self.df_clean)}")
+        self.update_active_text_column()
         self.update_preview(self.df_clean)
         self.populate_sentiment_page_type_filter()
+        self.populate_group_by_options()
         self.update_gate_state()
 
     def update_preview(self, df):
-        preview = df.head(200)
+        if df is None or df.empty:
+            self.tbl_preview.setRowCount(0)
+            return
+        preview_df = self.apply_language_filter(df)
+        preview = preview_df.head(200)
+        date_col, page_col, text_col = self.get_preview_columns(preview_df)
+        headers = ["date", "page_type", text_col]
+        self.tbl_preview.setColumnCount(3)
+        self.tbl_preview.setHorizontalHeaderLabels(headers)
         self.tbl_preview.setRowCount(len(preview))
         for row_idx, (_, row) in enumerate(preview.iterrows()):
-            self.tbl_preview.setItem(row_idx, 0, QTableWidgetItem(self.format_date(row.get("date"))))
-            self.tbl_preview.setItem(row_idx, 1, QTableWidgetItem(str(row.get("page_type", ""))))
-            self.tbl_preview.setItem(row_idx, 2, QTableWidgetItem(str(row.get("full_text", ""))))
+            self.tbl_preview.setItem(
+                row_idx, 0, QTableWidgetItem(self.format_date(row.get(date_col)))
+            )
+            self.tbl_preview.setItem(row_idx, 1, QTableWidgetItem(str(row.get(page_col, ""))))
+            self.tbl_preview.setItem(row_idx, 2, QTableWidgetItem(str(row.get(text_col, ""))))
+
+    def get_preview_columns(self, df: pd.DataFrame) -> tuple[str, str, str]:
+        if df is None:
+            return ("date", "page_type", self.text_column)
+        if "date" in df.columns and "page_type" in df.columns:
+            text_col = self.text_column if self.text_column in df.columns else "full_text"
+            return ("date", "page_type", text_col)
+        mapping = self.map_columns(df)
+        date_col = mapping.get("date") or "date"
+        page_col = mapping.get("page_type") or "page_type"
+        text_col = mapping.get("full_text") or "full_text"
+        return (date_col, page_col, text_col)
 
     def format_date(self, value):
         return safe_strftime(value)
@@ -2302,8 +2659,9 @@ class TextMiningApp(QMainWindow):
         if self.df_clean is None:
             return
         df = self.apply_monthly_sampling(self.df_clean)
+        text_col = self.get_analysis_text_column(df)
         tokens = list(itertools.chain.from_iterable(
-            self.tokenize_text(text) for text in df["full_text"]
+            self.tokenize_text(text) for text in df[text_col]
         ))
         series = pd.Series(tokens)
         freq = series.value_counts()
@@ -2444,6 +2802,8 @@ class TextMiningApp(QMainWindow):
     def tokenize_text(self, text: str):
         if not isinstance(text, str):
             return []
+        if self.base_language == "en":
+            return self.tokenize_sentiment_english(text)
         text = self.apply_preprocess_text(text)
         analysis = self.kiwi.analyze(text)
         if not analysis or not analysis[0][0]:
@@ -2504,11 +2864,7 @@ class TextMiningApp(QMainWindow):
         return "unknown"
 
     def get_sentiment_language_mode(self):
-        if self.rb_sent_lang_ko.isChecked():
-            return "ko"
-        if self.rb_sent_lang_en.isChecked():
-            return "en"
-        return "auto"
+        return "ko" if self.base_language == "ko" else "en"
 
     def parse_custom_terms(self, raw_text: str):
         if not raw_text:
@@ -2586,15 +2942,18 @@ class TextMiningApp(QMainWindow):
         else:
             df["bucket"] = df["date"].dt.to_period("Y").dt.start_time
 
-        selected_page = self.cb_page_type_filter.currentText()
-        if selected_page != "전체":
-            df = df[df["page_type"] == selected_page]
+        group_col = self.cb_group_by.currentText()
+        if group_col not in df.columns:
+            group_col = "group"
+        selected_group = self.cb_group_filter.currentText()
+        if selected_group != "전체" and group_col in df.columns:
+            df = df[df[group_col].astype(str) == selected_group]
 
-        if self.chk_split_by_page_type.isChecked():
-            summary = df.groupby(["bucket", "page_type"]).size().reset_index(name="count")
+        if self.chk_split_by_group.isChecked() and group_col in df.columns:
+            summary = df.groupby(["bucket", group_col]).size().reset_index(name="count")
         else:
             summary = df.groupby("bucket").size().reset_index(name="count")
-            summary["page_type"] = "전체"
+            summary[group_col] = "전체"
 
         summary = summary.sort_values("bucket")
         self.buzz_df = summary
@@ -2603,9 +2962,9 @@ class TextMiningApp(QMainWindow):
         labels = [self.format_date(val) for val in summary["bucket"]]
         note_text = ""
         pivot_counts = summary.pivot_table(
-            index="bucket", columns="page_type", values="count", fill_value=0
+            index="bucket", columns=group_col, values="count", fill_value=0
         ).sort_index()
-        if self.chk_split_by_page_type.isChecked():
+        if self.chk_split_by_group.isChecked() and group_col in summary.columns:
             if metric == "%":
                 pivot = pivot_counts.div(pivot_counts.sum(axis=1).replace(0, 1), axis=0) * 100
                 ylabel = "%"
@@ -2681,15 +3040,19 @@ class TextMiningApp(QMainWindow):
         else:
             df["bucket"] = df["date"].dt.to_period("Y").dt.start_time
         df = df[df["bucket"] == bucket]
-        selected_page = self.cb_page_type_filter.currentText()
-        if selected_page != "전체":
-            df = df[df["page_type"] == selected_page]
+        group_col = self.cb_group_by.currentText()
+        if group_col not in df.columns:
+            group_col = "group"
+        selected_group = self.cb_group_filter.currentText()
+        if selected_group != "전체" and group_col in df.columns:
+            df = df[df[group_col].astype(str) == selected_group]
 
         if df.empty:
             return
 
+        text_col = self.get_analysis_text_column(df)
         tokens = list(itertools.chain.from_iterable(
-            self.tokenize_text(text) for text in df["full_text"]
+            self.tokenize_text(text) for text in df[text_col]
         ))
         freq = pd.Series(tokens).value_counts()
         hot_topics = freq.head(10).index.tolist()
@@ -2709,18 +3072,18 @@ class TextMiningApp(QMainWindow):
             else:
                 prev_df["bucket"] = prev_df["date"].dt.to_period("Y").dt.start_time
             prev_df = prev_df[prev_df["bucket"] == prev_bucket]
-            if selected_page != "전체":
-                prev_df = prev_df[prev_df["page_type"] == selected_page]
+            if selected_group != "전체" and group_col in prev_df.columns:
+                prev_df = prev_df[prev_df[group_col].astype(str) == selected_group]
             prev_tokens = list(itertools.chain.from_iterable(
-                self.tokenize_text(text) for text in prev_df["full_text"]
+                self.tokenize_text(text) for text in prev_df[text_col]
             ))
             prev_freq = pd.Series(prev_tokens).value_counts()
             delta = (freq - prev_freq).fillna(0).sort_values(ascending=False)
             hot_delta = delta.head(10).index.tolist()
 
-        voc_samples = df["full_text"].head(3).tolist()
+        voc_samples = df[text_col].head(3).tolist()
         self.lbl_buzz_filters.setText(
-            f"기간/채널: {self.format_date(bucket)} / {selected_page}"
+            f"기간/그룹: {self.format_date(bucket)} / {selected_group}"
         )
         self.txt_buzz_hot.setPlainText("\n".join(hot_delta or hot_topics))
         self.txt_buzz_top.setPlainText("\n".join(hot_topics))
@@ -2749,8 +3112,9 @@ class TextMiningApp(QMainWindow):
             self.tbl_wc_topn.setRowCount(0)
             self.statusBar().showMessage("선택한 기간에 워드클라우드 데이터가 없습니다.")
             return
+        text_col = self.get_analysis_text_column(df)
         tokens = list(itertools.chain.from_iterable(
-            self.tokenize_text(text) for text in df["full_text"]
+            self.tokenize_text(text) for text in df[text_col]
         ))
         if not tokens:
             self.lbl_wc_count.setText("토큰 0 / 고유 0")
@@ -2875,14 +3239,15 @@ class TextMiningApp(QMainWindow):
 
         self.network_stopwords = self.parse_custom_terms(self.le_network_stopwords.text())
         token_lists = []
+        text_col = self.get_analysis_text_column(df)
         if scope == "문서(로우)":
-            for text in df["full_text"]:
+            for text in df[text_col]:
                 tokens = [normalize_term(token) for token in self.tokenize_text(text)]
                 tokens = [token for token in tokens if token and token not in self.network_stopwords]
                 if tokens:
                     token_lists.append(tokens)
         else:
-            for text in df["full_text"]:
+            for text in df[text_col]:
                 for sentence in split_sentences(text):
                     tokens = [normalize_term(token) for token in self.tokenize_text(sentence)]
                     tokens = [token for token in tokens if token and token not in self.network_stopwords]
@@ -3150,17 +3515,14 @@ class TextMiningApp(QMainWindow):
         self.update_sentiment_lexicon(include_english=lang_mode != "ko")
 
         df = self.apply_monthly_sampling(self.df_clean)
+        text_col = self.get_analysis_text_column(df)
         records = []
         total_token_count = 0
         for _, row in df.iterrows():
-            text = row.get("full_text", "")
+            text = row.get(text_col, "")
             prev_final_score = None
             for sentence in self.split_sentiment_sentences(text):
                 sentence_lang = lang_mode
-                if lang_mode == "auto":
-                    sentence_lang = self.detect_sentence_language(sentence)
-                if sentence_lang == "unknown":
-                    sentence_lang = "ko"
                 apply_rules = self.chk_rule_master.isChecked()
                 use_neg_scope = apply_rules and self.chk_rule_neg_scope.isChecked()
                 use_contrast = apply_rules and self.chk_rule_contrast.isChecked()
