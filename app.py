@@ -376,14 +376,26 @@ class ChartCanvas(FigureCanvas):
         count_k = count / 1000
         return f"{count_k:.2f}\n{percent:.1f}%"
 
-    def annotate_bars(self, bars, counts, percents):
+    def format_count_label(self, count: float) -> str:
+        return f"{int(round(count)):,}"
+
+    def format_percent_label(self, percent: float) -> str:
+        return f"{percent:.1f}%"
+
+    def annotate_bars(self, bars, counts, percents, label_mode="both"):
         for bar, count, percent in zip(bars, counts, percents):
             if count <= 0:
                 continue
+            if label_mode == "count":
+                label_text = self.format_count_label(count)
+            elif label_mode == "percent":
+                label_text = self.format_percent_label(percent)
+            else:
+                label_text = self.format_bar_label(count, percent)
             self.ax.text(
                 bar.get_x() + bar.get_width() / 2,
                 bar.get_height() / 2,
-                self.format_bar_label(count, percent),
+                label_text,
                 ha="center",
                 va="center",
                 fontsize=8,
@@ -486,6 +498,7 @@ class ChartCanvas(FigureCanvas):
         count_series=None,
         note_text="",
         show_labels=True,
+        label_mode="both",
     ):
         self.ax.clear()
         if labels and series:
@@ -502,10 +515,16 @@ class ChartCanvas(FigureCanvas):
                     for bar, bottom, count, percent in zip(bars, bottoms, counts, percents):
                         if count <= 0:
                             continue
+                        if label_mode == "count":
+                            label_text = self.format_count_label(count)
+                        elif label_mode == "percent":
+                            label_text = self.format_percent_label(percent)
+                        else:
+                            label_text = self.format_bar_label(count, percent)
                         self.ax.text(
                             bar.get_x() + bar.get_width() / 2,
                             bottom + bar.get_height() / 2,
-                            self.format_bar_label(count, percent),
+                            label_text,
                             ha="center",
                             va="center",
                             fontsize=8,
@@ -3418,7 +3437,12 @@ class TextMiningApp(QMainWindow):
         metric = self.cb_sent_metric.currentText()
         score_order = [-2, -1, 0, 1, 2]
         labels = [self.sentiment_bucket_label(score) for score in score_order]
-        note_text = "※ n 라벨은 건수/1000, %는 비중"
+        if metric == "%":
+            note_text = "※ 라벨은 비중"
+            label_mode = "percent"
+        else:
+            note_text = "※ 라벨은 건수"
+            label_mode = "count"
         if "topic" in summary.columns:
             pivot_counts = summary.pivot_table(
                 index="score", columns="topic", values="count", fill_value=0
@@ -3438,6 +3462,7 @@ class TextMiningApp(QMainWindow):
                 ylabel,
                 count_series=count_series,
                 note_text=note_text,
+                label_mode=label_mode,
             )
         else:
             counts = {score: 0 for score in score_order}
@@ -3459,7 +3484,7 @@ class TextMiningApp(QMainWindow):
                 self.sent_canvas.ax.set_xticklabels(labels, rotation=45, ha="right")
                 total = sum(count_values) or 1
                 percents = [(count / total) * 100 for count in count_values]
-                self.sent_canvas.annotate_bars(bars, count_values, percents)
+                self.sent_canvas.annotate_bars(bars, count_values, percents, label_mode=label_mode)
             self.sent_canvas.ax.set_title("감성 분포")
             self.sent_canvas.ax.set_ylabel(ylabel)
             self.sent_canvas.ax.grid(axis="y", alpha=0.3)
@@ -3488,9 +3513,11 @@ class TextMiningApp(QMainWindow):
         if metric == "%":
             pivot = pivot_counts.div(pivot_counts.sum(axis=1).replace(0, 1), axis=0) * 100
             ylabel = "%"
+            label_mode = "percent"
         else:
             pivot = pivot_counts
             ylabel = "count"
+            label_mode = "count"
         topics = list(pivot_counts.index)
         series = [
             (label, pivot[score].tolist(), SENTIMENT_COLORS.get(score, "#999999"))
@@ -3500,7 +3527,7 @@ class TextMiningApp(QMainWindow):
         x_positions = list(range(len(topics)))
         bottoms = [0] * len(topics)
         totals = pivot_counts.sum(axis=1).replace(0, 1).tolist()
-        note_text = "※ n 라벨은 건수/1000, %는 비중"
+        note_text = "※ 라벨은 비중" if metric == "%" else "※ 라벨은 건수"
         for score_idx, (label, values, color) in enumerate(series):
             bars = self.sent_topic_canvas.ax.bar(
                 x_positions, values, bottom=bottoms, label=label, color=color
@@ -3510,10 +3537,14 @@ class TextMiningApp(QMainWindow):
             for bar, bottom, count, percent in zip(bars, bottoms, counts, percents):
                 if count <= 0:
                     continue
+                if label_mode == "percent":
+                    label_text = self.sent_topic_canvas.format_percent_label(percent)
+                else:
+                    label_text = self.sent_topic_canvas.format_count_label(count)
                 self.sent_topic_canvas.ax.text(
                     bar.get_x() + bar.get_width() / 2,
                     bottom + bar.get_height() / 2,
-                    self.sent_topic_canvas.format_bar_label(count, percent),
+                    label_text,
                     ha="center",
                     va="center",
                     fontsize=8,
