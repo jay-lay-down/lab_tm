@@ -11,7 +11,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import List
 
+_base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+_argos_dir = _base / "argos_packages"
+os.environ["ARGOS_TRANSLATE_PACKAGES_DIR"] = str(_argos_dir)
+os.environ["ARGOS_PACKAGE_DIR"] = str(_argos_dir)
+
 import matplotlib
+matplotlib.use("Qt5Agg")
 import matplotlib.pyplot as plt
 from matplotlib import cm, colors
 from matplotlib import font_manager as fm
@@ -61,8 +67,6 @@ if getattr(sys, "_MEIPASS", None):
     bundled_nltk_path = Path(sys._MEIPASS) / "nltk_data"
     if bundled_nltk_path.exists() and str(bundled_nltk_path) not in nltk.data.path:
         nltk.data.path.insert(0, str(bundled_nltk_path))
-
-matplotlib.use("Qt5Agg")
 
 KNU_DICT_URL = "https://raw.githubusercontent.com/park1200656/KnuSentiLex/master/data/SentiWord_info.json"
 DEFAULT_RESOURCE_DIR = Path(r"C:\Users\70089004\text_file")
