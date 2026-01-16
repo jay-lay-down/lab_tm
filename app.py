@@ -42,11 +42,6 @@ from datetime import datetime
 from functools import lru_cache
 from typing import List
 
-_base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-_argos_dir = _base / "argos_packages"
-os.environ["ARGOS_TRANSLATE_PACKAGES_DIR"] = str(_argos_dir)
-os.environ["ARGOS_PACKAGE_DIR"] = str(_argos_dir)
-
 import matplotlib
 matplotlib.use("Qt5Agg")
 import matplotlib.pyplot as plt
@@ -1971,7 +1966,6 @@ class TextMiningApp(QMainWindow):
         if importlib.util.find_spec("argostranslate") is None:
             QMessageBox.warning(self, "번역 엔진 없음", "Argos Translate가 설치되어 있지 않습니다.")
             return
-        from argostranslate import package as argos_package
         from argostranslate import translate as argos_translate
 
         self.language_column = self.get_language_column()
@@ -2010,7 +2004,6 @@ class TextMiningApp(QMainWindow):
                     f"폴더: {', '.join(str(p) for p in self.get_argos_model_paths())}",
                 )
                 return
-            argos_package.install_from_path(str(model_path))
             translator = argos_translate.get_translation_from_codes(code, "en")
             if translator is None:
                 QMessageBox.warning(self, "번역기 초기화 실패", f"{code} → en 번역기 생성 실패")
@@ -2081,11 +2074,13 @@ class TextMiningApp(QMainWindow):
         df_mapped["page_type"] = df[mapping["page_type"]].astype(str)
         df_mapped["full_text"] = df[mapping["full_text"]].astype(str)
 
-        excluded_page_types = {
-            self.list_page_type.item(idx).text()
-            for idx in range(self.list_page_type.count())
-            if self.list_page_type.item(idx).checkState() == Qt.Checked
-        }
+        excluded_page_types = set()
+        for idx in range(self.list_page_type.count()):
+            item = self.list_page_type.item(idx)
+            if item.checkState() == Qt.Checked:
+                excluded_page_types.add(item.text())
+            if idx % 25 == 0:
+                QApplication.processEvents()
         if excluded_page_types:
             df_mapped = df_mapped[~df_mapped["page_type"].isin(excluded_page_types)]
 
@@ -3553,7 +3548,7 @@ class TextMiningApp(QMainWindow):
         text_col = self.get_analysis_text_column(df)
         records = []
         total_token_count = 0
-        for _, row in df.iterrows():
+        for row_idx, (_, row) in enumerate(df.iterrows()):
             text = row.get(text_col, "")
             prev_final_score = None
             for sentence in self.split_sentiment_sentences(text):
@@ -3681,6 +3676,8 @@ class TextMiningApp(QMainWindow):
                     }
                 )
                 prev_final_score = score
+            if row_idx % 20 == 0:
+                QApplication.processEvents()
 
         if total_token_count == 0:
             self.warn_no_tokens("감성분석")
