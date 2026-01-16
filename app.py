@@ -2487,6 +2487,12 @@ class TextMiningApp(QMainWindow):
         if self.df_clean is None:
             return
         topn = int(self.cb_wc_topn.currentText())
+        if topn <= 0:
+            self.lbl_wc_count.setText("토큰 0 / 고유 0")
+            self.lbl_wc_view.setText("워드클라우드 단어 수는 1 이상이어야 합니다")
+            self.tbl_wc_topn.setRowCount(0)
+            self.statusBar().showMessage("워드클라우드 단어 수를 1 이상으로 설정하세요.")
+            return
         df = self.filter_df_by_period(
             self.df_clean, self.cb_wc_period_unit, self.cb_wc_period_value
         )
@@ -2526,7 +2532,38 @@ class TextMiningApp(QMainWindow):
             collocations=False,
         )
         top_freq = freq.head(topn)
-        wc_img = wordcloud.generate_from_frequencies(top_freq.to_dict())
+        if top_freq.empty:
+            self.lbl_wc_view.setText("워드클라우드를 만들 단어가 없습니다")
+            self.tbl_wc_topn.setRowCount(0)
+            self.statusBar().showMessage("워드클라우드에 사용할 단어가 없습니다.")
+            return
+        try:
+            wc_img = wordcloud.generate_from_frequencies(top_freq.to_dict())
+        except ValueError:
+            fallback_wordcloud = WordCloud(
+                width=800,
+                height=500,
+                background_color="white",
+                font_path=str(font_path) if font_path else None,
+                colormap=colormap,
+                repeat=True,
+                prefer_horizontal=1.0,
+                collocations=False,
+            )
+            try:
+                wc_img = fallback_wordcloud.generate_from_frequencies(top_freq.to_dict())
+                self.statusBar().showMessage("마스크 없이 워드클라우드를 생성했습니다.")
+            except ValueError:
+                self.lbl_wc_view.setText("워드클라우드를 생성할 수 없습니다")
+                self.tbl_wc_topn.setRowCount(0)
+                QMessageBox.warning(
+                    self,
+                    "워드클라우드 오류",
+                    "워드클라우드를 생성할 공간이 부족합니다.\n"
+                    "단어 수를 줄이거나 마스크를 변경한 뒤 다시 시도해주세요.",
+                )
+                self.statusBar().showMessage("워드클라우드 생성에 실패했습니다.")
+                return
         wc_path = os.path.join(os.getcwd(), "wordcloud.png")
         wc_img.to_file(wc_path)
         self.wc_image_path = wc_path
