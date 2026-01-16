@@ -42,11 +42,6 @@ from datetime import datetime
 from functools import lru_cache
 from typing import List
 
-_base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-_argos_dir = _base / "argos_packages"
-os.environ["ARGOS_TRANSLATE_PACKAGES_DIR"] = str(_argos_dir)
-os.environ["ARGOS_PACKAGE_DIR"] = str(_argos_dir)
-
 import matplotlib
 matplotlib.use("Qt5Agg")
 import matplotlib.pyplot as plt
@@ -1998,24 +1993,24 @@ class TextMiningApp(QMainWindow):
             return
 
         translators = {}
-        for code in set(value_to_lang.values()):
-            if code == "en":
-                continue
-            model_path = self.find_argos_model_path(code, "en")
-            if model_path is None:
-                QMessageBox.warning(
-                    self,
-                    "모델 누락",
-                    f"{code} → en 모델을 찾을 수 없습니다.\n"
-                    f"폴더: {', '.join(str(p) for p in self.get_argos_model_paths())}",
-                )
-                return
-            argos_package.install_from_path(str(model_path))
-            translator = argos_translate.get_translation_from_codes(code, "en")
-            if translator is None:
-                QMessageBox.warning(self, "번역기 초기화 실패", f"{code} → en 번역기 생성 실패")
-                return
-            translators[code] = translator
+        try:
+            argos_package.update_package_index()
+            for code in set(value_to_lang.values()):
+                if code == "en":
+                    continue
+                translator = argos_translate.get_translation_from_codes(code, "en")
+                if translator is None:
+                    QMessageBox.warning(
+                        self,
+                        "모델 로드 실패",
+                        "번역 모델을 찾을 수 없습니다: "
+                        f"{code} -> en\nEXE와 같은 폴더의 argos_packages 폴더를 확인하세요.",
+                    )
+                    return
+                translators[code] = translator
+        except Exception as e:
+            QMessageBox.warning(self, "오류", f"번역기 초기화 실패: {e}")
+            return
 
         df = self.df_clean.copy()
         target_col = "full_text" if self.chk_translate_overwrite.isChecked() else "full_text_en"
@@ -2025,14 +2020,19 @@ class TextMiningApp(QMainWindow):
         subset = df.loc[mask, ["full_text", self.language_column]]
 
         translated_texts = []
-        for _, row in subset.iterrows():
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx % 10 == 0:
+                QApplication.processEvents()
             lang_code = value_to_lang.get(str(row[self.language_column]))
             text = row["full_text"]
             if lang_code == "en" or not isinstance(text, str):
                 translated_texts.append(text)
                 continue
             translator = translators.get(lang_code)
-            translated_texts.append(translator.translate(text) if translator else text)
+            try:
+                translated_texts.append(translator.translate(text) if translator else text)
+            except Exception:
+                translated_texts.append(text)
 
         df.loc[mask, target_col] = translated_texts
         self.df_clean = df
@@ -2081,11 +2081,13 @@ class TextMiningApp(QMainWindow):
         df_mapped["page_type"] = df[mapping["page_type"]].astype(str)
         df_mapped["full_text"] = df[mapping["full_text"]].astype(str)
 
-        excluded_page_types = {
-            self.list_page_type.item(idx).text()
-            for idx in range(self.list_page_type.count())
-            if self.list_page_type.item(idx).checkState() == Qt.Checked
-        }
+        excluded_page_types = set()
+        for idx in range(self.list_page_type.count()):
+            item = self.list_page_type.item(idx)
+            if item.checkState() == Qt.Checked:
+                excluded_page_types.add(item.text())
+            if idx % 25 == 0:
+                QApplication.processEvents()
         if excluded_page_types:
             df_mapped = df_mapped[~df_mapped["page_type"].isin(excluded_page_types)]
 
@@ -3553,7 +3555,7 @@ class TextMiningApp(QMainWindow):
         text_col = self.get_analysis_text_column(df)
         records = []
         total_token_count = 0
-        for _, row in df.iterrows():
+        for row_idx, (_, row) in enumerate(df.iterrows()):
             text = row.get(text_col, "")
             prev_final_score = None
             for sentence in self.split_sentiment_sentences(text):
@@ -3681,6 +3683,8 @@ class TextMiningApp(QMainWindow):
                     }
                 )
                 prev_final_score = score
+            if row_idx % 20 == 0:
+                QApplication.processEvents()
 
         if total_token_count == 0:
             self.warn_no_tokens("감성분석")
