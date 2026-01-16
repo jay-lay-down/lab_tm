@@ -1,7 +1,11 @@
-import importlib.util
 import os
 import sys
 from pathlib import Path
+
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+import importlib.util
+import nltk
 
 
 def _setup_runtime_paths():
@@ -10,8 +14,10 @@ def _setup_runtime_paths():
     else:
         base = Path(__file__).resolve().parent
 
-    # NLTK: 번들된 nltk_data 우선
-    os.environ["NLTK_DATA"] = str(base / "nltk_data")
+    nltk_path = base / "nltk_data"
+    os.environ["NLTK_DATA"] = str(nltk_path)
+    if str(nltk_path) not in nltk.data.path:
+        nltk.data.path.insert(0, str(nltk_path))
 
     # Argos: base 경로의 argos_packages 사용 + SBD 끔
     pkg_dir = base / "argos_packages"
