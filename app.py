@@ -6,6 +6,7 @@ import re
 import sys
 import unicodedata
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import List
 
@@ -19,6 +20,9 @@ import pandas as pd
 import requests
 from kiwipiepy import Kiwi
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import nltk
+from nltk.corpus import sentiwordnet as swn
+from nltk.corpus import wordnet
 from openpyxl.drawing.image import Image as XLImage
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QFontDatabase, QPixmap
@@ -60,6 +64,7 @@ DEFAULT_FONT_NAME = "Pretendard-Medium.otf"
 DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
 DEFAULT_EN_SENTI_NAME = "SentiWord_EN.txt"
 DEFAULT_NETWORK_FONT_NAME = "malgun.ttf"
+DEFAULT_NLTK_DATA_DIR = "nltk_data"
 PERIOD_ALL_LABEL = "전체 기간"
 FALLBACK_FONT_NAMES = [
     "Pretendard",
@@ -267,36 +272,88 @@ def load_knu_dictionary(parent=None):
 
 
 def load_english_dictionary(parent=None):
-    for path in candidate_resource_paths(DEFAULT_EN_SENTI_NAME):
-        if path.exists():
-            with open(path, "r", encoding="utf-8") as file:
-                content = file.read()
-            data = content.splitlines()
-            senti_dict = parse_sentiment_entries(data)
-            if senti_dict:
-                return senti_dict
-
-    selected_path, _ = QFileDialog.getOpenFileName(
-        parent,
-        "English Sentiment Dictionary 선택",
-        str(DEFAULT_RESOURCE_DIR),
-        "Dictionary Files (*.txt *.csv);;All Files (*)",
-    )
-    if selected_path:
-        with open(selected_path, "r", encoding="utf-8") as file:
-            content = file.read()
-        data = content.splitlines()
-        senti_dict = parse_sentiment_entries(data)
-        if senti_dict:
-            return senti_dict
-
+    if not ensure_nltk_resources(parent):
+        return {}
+    senti_dict = build_sentiwordnet_lexicon()
+    if senti_dict:
+        return senti_dict
     QMessageBox.warning(
         parent,
         "Dictionary Error",
-        "영어 감성사전 로드 실패.\n"
-        "내장/로컬 사전을 확인하거나 파일 선택을 이용해주세요.",
+        "SentiWordNet 감성사전 로드 실패.\n"
+        "NLTK 리소스를 확인해주세요.",
     )
     return {}
+
+
+def get_nltk_data_paths() -> list[Path]:
+    return [
+        Path(resource_path(DEFAULT_NLTK_DATA_DIR)),
+        DEFAULT_RESOURCE_DIR / DEFAULT_NLTK_DATA_DIR,
+        Path(__file__).resolve().parent / DEFAULT_NLTK_DATA_DIR,
+    ]
+
+
+def ensure_nltk_resources(parent=None) -> bool:
+    for path in get_nltk_data_paths():
+        if str(path) not in nltk.data.path:
+            nltk.data.path.append(str(path))
+    resources = {
+        "corpora/wordnet": "wordnet",
+        "corpora/sentiwordnet": "sentiwordnet",
+        "corpora/omw-1.4": "omw-1.4",
+    }
+    missing = []
+    for path, name in resources.items():
+        try:
+            nltk.data.find(path)
+        except LookupError:
+            missing.append(name)
+    if missing:
+        download_dir = None
+        for path in get_nltk_data_paths():
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                download_dir = str(path)
+                break
+            except OSError:
+                continue
+        for name in missing:
+            nltk.download(name, quiet=True, download_dir=download_dir)
+    still_missing = []
+    for path, name in resources.items():
+        try:
+            nltk.data.find(path)
+        except LookupError:
+            still_missing.append(name)
+    if still_missing:
+        QMessageBox.warning(
+            parent,
+            "NLTK Resource Error",
+            "NLTK 리소스를 다운로드하지 못했습니다.\n"
+            f"누락 항목: {', '.join(still_missing)}\n"
+            f"NLTK 경로: {', '.join(str(p) for p in get_nltk_data_paths())}",
+        )
+        return False
+    return True
+
+
+@lru_cache(maxsize=1)
+def build_sentiwordnet_lexicon():
+    senti_dict = {}
+    counts = {}
+    for senti_synset in swn.all_senti_synsets():
+        score = senti_synset.pos_score() - senti_synset.neg_score()
+        if score == 0:
+            continue
+        for lemma in senti_synset.synset.lemma_names():
+            token = wordnet.morphy(lemma) or lemma
+            token = token.replace("_", " ").lower()
+            senti_dict[token] = senti_dict.get(token, 0) + score
+            counts[token] = counts.get(token, 0) + 1
+    for token, total in senti_dict.items():
+        senti_dict[token] = total / counts[token]
+    return senti_dict
 
 
 def split_sentences(text: str):
