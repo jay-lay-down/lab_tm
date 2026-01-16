@@ -1,14 +1,32 @@
+import os
+import sys
+from pathlib import Path
+
+
+def _setup_runtime_paths():
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+
+    # NLTK: 번들된 nltk_data 우선
+    os.environ["NLTK_DATA"] = str(base / "nltk_data")
+
+    # Argos: 번들된 argos_packages 우선 + SBD 끔
+    pkg_dir = base / "argos_packages"
+    os.environ["ARGOS_TRANSLATE_PACKAGES_DIR"] = str(pkg_dir)
+    os.environ["ARGOS_PACKAGE_DIR"] = str(pkg_dir)
+    os.environ["ARGOS_PACKAGES_DIR"] = str(pkg_dir)
+    os.environ["ARGOS_CHUNK_TYPE"] = "NONE"
+
+
+_setup_runtime_paths()
+
 import importlib.util
 import itertools
 import json
-import os
 import random
 import re
-import sys
 import unicodedata
 from datetime import datetime
 from functools import lru_cache
-from pathlib import Path
 from typing import List
 
 _base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
