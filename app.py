@@ -58,6 +58,7 @@ KNU_DICT_URL = "https://raw.githubusercontent.com/park1200656/KnuSentiLex/master
 DEFAULT_RESOURCE_DIR = Path(r"C:\Users\70089004\text_file")
 DEFAULT_FONT_NAME = "Pretendard-Medium.otf"
 DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
+DEFAULT_EN_SENTI_NAME = "SentiWord_EN.txt"
 DEFAULT_NETWORK_FONT_NAME = "malgun.ttf"
 PERIOD_ALL_LABEL = "전체 기간"
 FALLBACK_FONT_NAMES = [
@@ -78,8 +79,31 @@ SENTIMENT_COLORS = {
 EMOTICON_PATTERN = re.compile(r"(ㅠㅠ|ㅜㅜ|ㅎㅎ|ㅋㅋ|ㅋ{2,}|ㅎ{2,})")
 PROFANITY_PATTERN = re.compile(r"(ㅅㅂ|시발|씨발|ㅆㅂ|존나|ㅈㄴ|개)")
 POSITIVE_PATTERN = re.compile(r"(좋다|좋아|최고|추천|만족|굿|대박|good|굿)")
-NEGATION_TOKENS = {"안", "못", "별로", "전혀", "아니", "없", "않"}
-CONTRAST_TOKENS = ["하지만", "근데", "그런데", "그러나"]
+NEGATION_TOKENS_KO = {"안", "못", "별로", "전혀", "아니", "없", "않"}
+NEGATION_TOKENS_EN = {
+    "not",
+    "no",
+    "never",
+    "none",
+    "n't",
+    "cannot",
+    "can't",
+    "won't",
+    "don't",
+    "doesn't",
+    "didn't",
+    "isn't",
+    "aren't",
+    "wasn't",
+    "weren't",
+    "shouldn't",
+    "couldn't",
+    "wouldn't",
+    "without",
+    "hardly",
+    "barely",
+}
+CONTRAST_TOKENS = ["하지만", "근데", "그런데", "그러나", "but", "however", "though", "although", "yet"]
 CONTRACTIONS_MAP = {
     "can't": "cannot",
     "won't": "will not",
@@ -111,6 +135,7 @@ QUOTE_TRANSLATION = str.maketrans(
         "»": '"',
     }
 )
+EN_WORD_PATTERN = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
 
 
 def resource_path(rel_path: str) -> str:
@@ -167,13 +192,20 @@ def configure_matplotlib_font(font_path: str | None):
     plt.rcParams["axes.unicode_minus"] = False
 
 
+def parse_score_value(raw):
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_sentiment_entries(entries):
     senti_dict = {}
     for entry in entries:
         if isinstance(entry, dict):
             root = entry.get("word_root", entry.get("word"))
-            score = int(entry.get("polarity", 0))
-            if root:
+            score = parse_score_value(entry.get("polarity", 0))
+            if root and score is not None:
                 senti_dict[root] = score
             continue
         if isinstance(entry, str):
@@ -181,9 +213,8 @@ def parse_sentiment_entries(entries):
             if len(parts) >= 2:
                 root = parts[0].strip()
                 if root:
-                    try:
-                        score = int(parts[1].strip())
-                    except ValueError:
+                    score = parse_score_value(parts[1].strip())
+                    if score is None:
                         continue
                     senti_dict[root] = score
     return senti_dict
@@ -232,6 +263,39 @@ def load_knu_dictionary(parent=None):
             "내장/로컬 사전을 확인하거나 파일 선택을 이용해주세요.\n"
             f"{exc}",
         )
+    return {}
+
+
+def load_english_dictionary(parent=None):
+    for path in candidate_resource_paths(DEFAULT_EN_SENTI_NAME):
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as file:
+                content = file.read()
+            data = content.splitlines()
+            senti_dict = parse_sentiment_entries(data)
+            if senti_dict:
+                return senti_dict
+
+    selected_path, _ = QFileDialog.getOpenFileName(
+        parent,
+        "English Sentiment Dictionary 선택",
+        str(DEFAULT_RESOURCE_DIR),
+        "Dictionary Files (*.txt *.csv);;All Files (*)",
+    )
+    if selected_path:
+        with open(selected_path, "r", encoding="utf-8") as file:
+            content = file.read()
+        data = content.splitlines()
+        senti_dict = parse_sentiment_entries(data)
+        if senti_dict:
+            return senti_dict
+
+    QMessageBox.warning(
+        parent,
+        "Dictionary Error",
+        "영어 감성사전 로드 실패.\n"
+        "내장/로컬 사전을 확인하거나 파일 선택을 이용해주세요.",
+    )
     return {}
 
 
@@ -530,6 +594,8 @@ class TextMiningApp(QMainWindow):
 
         self.senti_dict = None
         self.senti_max_n = 1
+        self.senti_dict_en = None
+        self.senti_max_n_en = 1
         self.kiwi = Kiwi()
         self.font_path = resolve_font_path()
         self.network_font_path = resolve_network_font_path()
@@ -1136,7 +1202,7 @@ class TextMiningApp(QMainWindow):
         layout = QVBoxLayout(tab)
 
         top = QWidget()
-        top.setFixedHeight(190)
+        top.setFixedHeight(210)
         top_layout = QVBoxLayout(top)
         filter_row = QWidget()
         filter_layout = QGridLayout(filter_row)
@@ -1155,6 +1221,18 @@ class TextMiningApp(QMainWindow):
         self.cb_sent_metric.currentIndexChanged.connect(self.update_sentiment_view)
         self.cb_sentence_split = QComboBox()
         self.cb_sentence_split.addItems(["기본", "강함(쉼표 포함)"])
+        self.rb_sent_lang_auto = QRadioButton("자동")
+        self.rb_sent_lang_ko = QRadioButton("한국어")
+        self.rb_sent_lang_en = QRadioButton("영어")
+        self.rb_sent_lang_auto.setChecked(True)
+        for rb in [self.rb_sent_lang_auto, self.rb_sent_lang_ko, self.rb_sent_lang_en]:
+            rb.toggled.connect(self.handle_sentiment_language_change)
+        self.group_sent_lang = QGroupBox("언어")
+        lang_layout = QHBoxLayout(self.group_sent_lang)
+        lang_layout.setContentsMargins(6, 4, 6, 4)
+        lang_layout.addWidget(self.rb_sent_lang_auto)
+        lang_layout.addWidget(self.rb_sent_lang_ko)
+        lang_layout.addWidget(self.rb_sent_lang_en)
         self.cb_brand_filter = QComboBox()
         self.cb_brand_filter.addItem("전체")
         self.cb_brand_filter.currentIndexChanged.connect(self.update_sentiment_view)
@@ -1175,6 +1253,7 @@ class TextMiningApp(QMainWindow):
         filter_layout.addWidget(QLabel("지표"), 0, 6)
         filter_layout.addWidget(self.cb_sent_metric, 0, 7)
         filter_layout.addWidget(self.chk_monthly_sample_sent, 0, 8)
+        filter_layout.addWidget(self.group_sent_lang, 0, 9, 1, 2)
         filter_layout.addWidget(QLabel("문장 분리"), 1, 0)
         filter_layout.addWidget(self.cb_sentence_split, 1, 1)
         filter_layout.addWidget(self.btn_run_sentiment, 1, 2)
@@ -1691,14 +1770,29 @@ class TextMiningApp(QMainWindow):
             sentences.append(sentence)
         return sentences
 
-    def update_sentiment_lexicon(self):
+    def update_sentiment_lexicon(self, include_english: bool = False):
         if self.senti_dict is None:
             self.senti_dict = load_knu_dictionary(self)
-        self.senti_max_n = 1
-        for word in self.senti_dict.keys():
+        if include_english and self.senti_dict_en is None:
+            self.senti_dict_en = load_english_dictionary(self)
+        self.senti_max_n = self.calculate_max_ngram(self.senti_dict)
+        self.senti_max_n_en = self.calculate_max_ngram(self.senti_dict_en)
+
+    def calculate_max_ngram(self, senti_dict):
+        max_n = 1
+        if not senti_dict:
+            return max_n
+        for word in senti_dict.keys():
             token_len = max(1, len(str(word).split()))
-            if token_len > self.senti_max_n:
-                self.senti_max_n = token_len
+            if token_len > max_n:
+                max_n = token_len
+        return max_n
+
+    def handle_sentiment_language_change(self, checked: bool | None = None):
+        if self.df_clean is not None and self.sentiment_records_df is not None:
+            self.run_sentiment()
+            return
+        self.update_sentiment_view()
 
     def ensure_topic_dictionary(self, show_warning: bool = True) -> bool:
         if self.brand_map:
@@ -1711,12 +1805,12 @@ class TextMiningApp(QMainWindow):
             )
         return False
 
-    def match_sentiment_tokens(self, tokens):
-        if not tokens or not self.senti_dict:
+    def match_sentiment_tokens(self, tokens, senti_dict, max_n):
+        if not tokens or not senti_dict:
             return []
         used = [False] * len(tokens)
         matched = []
-        for n in range(self.senti_max_n, 0, -1):
+        for n in range(max_n, 0, -1):
             if len(tokens) < n:
                 continue
             idx = 0
@@ -1727,9 +1821,9 @@ class TextMiningApp(QMainWindow):
                 cand1 = "".join(tokens[idx : idx + n]).strip()
                 cand2 = " ".join(tokens[idx : idx + n]).strip()
                 hit = None
-                if cand1 in self.senti_dict:
+                if cand1 in senti_dict:
                     hit = cand1
-                elif cand2 in self.senti_dict:
+                elif cand2 in senti_dict:
                     hit = cand2
                 if hit:
                     matched.append({"token": hit, "start": idx, "end": idx + n})
@@ -1740,16 +1834,16 @@ class TextMiningApp(QMainWindow):
                     idx += 1
         return matched
 
-    def apply_negation_scope(self, tokens, matches):
+    def apply_negation_scope(self, tokens, matches, senti_dict, negation_tokens):
         adjusted_scores = []
         negated_tokens = set()
         for match in matches:
             token = match["token"]
             start = match["start"]
-            score = self.senti_dict.get(token, 0)
+            score = senti_dict.get(token, 0)
             scope_start = max(0, start - 3)
             scope_tokens = tokens[scope_start:start]
-            if any(scope in NEGATION_TOKENS for scope in scope_tokens):
+            if any(scope in negation_tokens for scope in scope_tokens):
                 score = -score
                 negated_tokens.add(token)
             adjusted_scores.append(score)
@@ -1757,6 +1851,13 @@ class TextMiningApp(QMainWindow):
 
     def split_contrast_clauses(self, sentence: str):
         for token in CONTRAST_TOKENS:
+            if re.search(rf"\b{re.escape(token)}\b", sentence, flags=re.IGNORECASE):
+                parts = re.split(rf"\b{re.escape(token)}\b", sentence, maxsplit=1, flags=re.IGNORECASE)
+                if len(parts) == 2:
+                    before, after = parts
+                    return [before.strip(), after.strip()]
+            if re.fullmatch(r"[A-Za-z]+", token):
+                continue
             if token in sentence:
                 before, after = sentence.split(token, 1)
                 return [before.strip(), after.strip()]
@@ -1768,28 +1869,36 @@ class TextMiningApp(QMainWindow):
             return [before.strip(), after.strip()]
         return [sentence]
 
-    def calculate_sentence_score(self, sentence: str, tokens, matches, apply_neg_scope: bool):
+    def calculate_sentence_score(
+        self,
+        sentence: str,
+        tokens,
+        matches,
+        apply_neg_scope: bool,
+        senti_dict,
+        negation_tokens,
+    ):
         matched_tokens = [match["token"] for match in matches]
         reasons = []
         if not matches:
             return 0, matched_tokens, reasons
         if apply_neg_scope:
-            scores, negated = self.apply_negation_scope(tokens, matches)
+            scores, negated = self.apply_negation_scope(tokens, matches, senti_dict, negation_tokens)
             if negated:
                 reasons.append("부정어 스코프")
         else:
-            scores = [self.senti_dict.get(match["token"], 0) for match in matches]
+            scores = [senti_dict.get(match["token"], 0) for match in matches]
         raw_score = sum(scores)
         return raw_score, matched_tokens, reasons
 
     def bin_sentiment_score(self, raw_score: float) -> int:
-        if raw_score <= -2:
+        if raw_score <= -1.5:
             return -2
-        if raw_score == -1:
+        if raw_score < -0.5:
             return -1
-        if raw_score == 0:
+        if -0.5 <= raw_score <= 0.5:
             return 0
-        if raw_score == 1:
+        if raw_score < 1.5:
             return 1
         return 2
 
@@ -2267,6 +2376,64 @@ class TextMiningApp(QMainWindow):
         tokens = [token for token, tag, _, _ in analysis[0][0] if tag in allowed_tags]
         return self.apply_post_token_rules(tokens)
 
+    def get_sentiment_pos_tags(self):
+        return {
+            "NNG",
+            "NNP",
+            "NNB",
+            "NR",
+            "NP",
+            "VA",
+            "VV",
+            "VX",
+            "MAG",
+            "MM",
+            "IC",
+        }
+
+    def tokenize_sentiment_korean(self, text: str):
+        if not isinstance(text, str):
+            return []
+        text = self.apply_preprocess_text(text)
+        analysis = self.kiwi.analyze(text)
+        if not analysis or not analysis[0][0]:
+            return []
+        allowed_tags = self.get_sentiment_pos_tags()
+        tokens = [token for token, tag, _, _ in analysis[0][0] if tag in allowed_tags]
+        return self.apply_post_token_rules(tokens)
+
+    def tokenize_sentiment_english(self, text: str):
+        if not isinstance(text, str):
+            return []
+        text = self.apply_preprocess_text(text)
+        tokens = [match.group(0).lower() for match in EN_WORD_PATTERN.finditer(text)]
+        return self.apply_post_token_rules(tokens)
+
+    def detect_sentence_language(self, sentence: str):
+        if not isinstance(sentence, str):
+            return "unknown"
+        ko_count = len(re.findall(r"[가-힣]", sentence))
+        en_count = len(re.findall(r"[A-Za-z]", sentence))
+        if ko_count and en_count:
+            total = ko_count + en_count
+            if ko_count / total >= 0.7:
+                return "ko"
+            if en_count / total >= 0.7:
+                return "en"
+            return "mixed"
+        if ko_count:
+            return "ko"
+        if en_count:
+            return "en"
+        return "unknown"
+
+    def get_sentiment_language_mode(self):
+        if self.rb_sent_lang_ko.isChecked():
+            return "ko"
+        if self.rb_sent_lang_en.isChecked():
+            return "en"
+        return "auto"
+
     def parse_custom_terms(self, raw_text: str):
         if not raw_text:
             return set()
@@ -2486,7 +2653,10 @@ class TextMiningApp(QMainWindow):
     def build_wordcloud(self):
         if self.df_clean is None:
             return
-        topn = int(self.cb_wc_topn.currentText())
+        try:
+            topn = int(self.cb_wc_topn.currentText())
+        except (TypeError, ValueError):
+            topn = 0
         if topn <= 0:
             self.lbl_wc_count.setText("토큰 0 / 고유 0")
             self.lbl_wc_view.setText("워드클라우드 단어 수는 1 이상이어야 합니다")
@@ -2497,6 +2667,12 @@ class TextMiningApp(QMainWindow):
             self.df_clean, self.cb_wc_period_unit, self.cb_wc_period_value
         )
         df = self.apply_monthly_sampling(df)
+        if df is None or df.empty:
+            self.lbl_wc_count.setText("토큰 0 / 고유 0")
+            self.lbl_wc_view.setText("표시할 데이터가 없습니다")
+            self.tbl_wc_topn.setRowCount(0)
+            self.statusBar().showMessage("선택한 기간에 워드클라우드 데이터가 없습니다.")
+            return
         tokens = list(itertools.chain.from_iterable(
             self.tokenize_text(text) for text in df["full_text"]
         ))
@@ -2539,7 +2715,7 @@ class TextMiningApp(QMainWindow):
             return
         try:
             wc_img = wordcloud.generate_from_frequencies(top_freq.to_dict())
-        except ValueError:
+        except Exception:
             fallback_wordcloud = WordCloud(
                 width=800,
                 height=500,
@@ -2553,14 +2729,15 @@ class TextMiningApp(QMainWindow):
             try:
                 wc_img = fallback_wordcloud.generate_from_frequencies(top_freq.to_dict())
                 self.statusBar().showMessage("마스크 없이 워드클라우드를 생성했습니다.")
-            except ValueError:
+            except Exception as fallback_exc:
                 self.lbl_wc_view.setText("워드클라우드를 생성할 수 없습니다")
                 self.tbl_wc_topn.setRowCount(0)
                 QMessageBox.warning(
                     self,
                     "워드클라우드 오류",
-                    "워드클라우드를 생성할 공간이 부족합니다.\n"
-                    "단어 수를 줄이거나 마스크를 변경한 뒤 다시 시도해주세요.",
+                    "워드클라우드를 생성할 수 없습니다.\n"
+                    "단어 수를 줄이거나 마스크를 변경한 뒤 다시 시도해주세요.\n"
+                    f"원인: {fallback_exc}",
                 )
                 self.statusBar().showMessage("워드클라우드 생성에 실패했습니다.")
                 return
@@ -2893,7 +3070,8 @@ class TextMiningApp(QMainWindow):
     def run_sentiment(self):
         if self.df_clean is None:
             return
-        self.update_sentiment_lexicon()
+        lang_mode = self.get_sentiment_language_mode()
+        self.update_sentiment_lexicon(include_english=lang_mode != "ko")
 
         df = self.apply_monthly_sampling(self.df_clean)
         records = []
@@ -2902,6 +3080,11 @@ class TextMiningApp(QMainWindow):
             text = row.get("full_text", "")
             prev_final_score = None
             for sentence in self.split_sentiment_sentences(text):
+                sentence_lang = lang_mode
+                if lang_mode == "auto":
+                    sentence_lang = self.detect_sentence_language(sentence)
+                if sentence_lang == "unknown":
+                    sentence_lang = "ko"
                 apply_rules = self.chk_rule_master.isChecked()
                 use_neg_scope = apply_rules and self.chk_rule_neg_scope.isChecked()
                 use_contrast = apply_rules and self.chk_rule_contrast.isChecked()
@@ -2918,12 +3101,73 @@ class TextMiningApp(QMainWindow):
                 matched_tokens = []
                 reasons = []
                 for idx, clause in enumerate(clauses):
-                    tokens = self.tokenize_text(clause)
-                    total_token_count += len(tokens)
-                    matches = self.match_sentiment_tokens(tokens)
-                    clause_score, clause_matched, clause_reasons = self.calculate_sentence_score(
-                        clause, tokens, matches, use_neg_scope
-                    )
+                    clause_lang = sentence_lang
+                    if clause_lang == "unknown":
+                        clause_lang = "ko"
+                    clause_score = 0
+                    clause_matched = []
+                    clause_reasons = []
+                    if clause_lang == "ko":
+                        tokens = self.tokenize_sentiment_korean(clause)
+                        total_token_count += len(tokens)
+                        matches = self.match_sentiment_tokens(tokens, self.senti_dict, self.senti_max_n)
+                        clause_score, clause_matched, clause_reasons = self.calculate_sentence_score(
+                            clause,
+                            tokens,
+                            matches,
+                            use_neg_scope,
+                            self.senti_dict,
+                            NEGATION_TOKENS_KO,
+                        )
+                    elif clause_lang == "en":
+                        tokens = self.tokenize_sentiment_english(clause)
+                        total_token_count += len(tokens)
+                        matches = self.match_sentiment_tokens(
+                            tokens,
+                            self.senti_dict_en,
+                            self.senti_max_n_en,
+                        )
+                        clause_score, clause_matched, clause_reasons = self.calculate_sentence_score(
+                            clause,
+                            tokens,
+                            matches,
+                            use_neg_scope,
+                            self.senti_dict_en,
+                            NEGATION_TOKENS_EN,
+                        )
+                    else:
+                        ko_tokens = self.tokenize_sentiment_korean(clause)
+                        en_tokens = self.tokenize_sentiment_english(clause)
+                        total_token_count += len(ko_tokens) + len(en_tokens)
+                        ko_matches = self.match_sentiment_tokens(
+                            ko_tokens,
+                            self.senti_dict,
+                            self.senti_max_n,
+                        )
+                        en_matches = self.match_sentiment_tokens(
+                            en_tokens,
+                            self.senti_dict_en,
+                            self.senti_max_n_en,
+                        )
+                        ko_score, ko_matched, ko_reasons = self.calculate_sentence_score(
+                            clause,
+                            ko_tokens,
+                            ko_matches,
+                            use_neg_scope,
+                            self.senti_dict,
+                            NEGATION_TOKENS_KO,
+                        )
+                        en_score, en_matched, en_reasons = self.calculate_sentence_score(
+                            clause,
+                            en_tokens,
+                            en_matches,
+                            use_neg_scope,
+                            self.senti_dict_en,
+                            NEGATION_TOKENS_EN,
+                        )
+                        clause_score = ko_score + en_score
+                        clause_matched = ko_matched + en_matched
+                        clause_reasons = ko_reasons + en_reasons
                     weight = 1.0 if idx == 0 else 1.5
                     if len(clauses) > 1 and idx > 0:
                         reasons.append("대조 접속어")
