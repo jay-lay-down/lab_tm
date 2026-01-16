@@ -64,6 +64,7 @@ DEFAULT_FONT_NAME = "Pretendard-Medium.otf"
 DEFAULT_SENTI_NAME = "SentiWord_Dict.txt"
 DEFAULT_EN_SENTI_NAME = "SentiWord_EN.txt"
 DEFAULT_NETWORK_FONT_NAME = "malgun.ttf"
+DEFAULT_NLTK_DATA_DIR = "nltk_data"
 PERIOD_ALL_LABEL = "전체 기간"
 FALLBACK_FONT_NAMES = [
     "Pretendard",
@@ -285,7 +286,18 @@ def load_english_dictionary(parent=None):
     return {}
 
 
+def get_nltk_data_paths() -> list[Path]:
+    return [
+        Path(resource_path(DEFAULT_NLTK_DATA_DIR)),
+        DEFAULT_RESOURCE_DIR / DEFAULT_NLTK_DATA_DIR,
+        Path(__file__).resolve().parent / DEFAULT_NLTK_DATA_DIR,
+    ]
+
+
 def ensure_nltk_resources(parent=None) -> bool:
+    for path in get_nltk_data_paths():
+        if str(path) not in nltk.data.path:
+            nltk.data.path.append(str(path))
     resources = {
         "corpora/wordnet": "wordnet",
         "corpora/sentiwordnet": "sentiwordnet",
@@ -298,8 +310,16 @@ def ensure_nltk_resources(parent=None) -> bool:
         except LookupError:
             missing.append(name)
     if missing:
+        download_dir = None
+        for path in get_nltk_data_paths():
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                download_dir = str(path)
+                break
+            except OSError:
+                continue
         for name in missing:
-            nltk.download(name, quiet=True)
+            nltk.download(name, quiet=True, download_dir=download_dir)
     still_missing = []
     for path, name in resources.items():
         try:
@@ -311,7 +331,8 @@ def ensure_nltk_resources(parent=None) -> bool:
             parent,
             "NLTK Resource Error",
             "NLTK 리소스를 다운로드하지 못했습니다.\n"
-            f"누락 항목: {', '.join(still_missing)}",
+            f"누락 항목: {', '.join(still_missing)}\n"
+            f"NLTK 경로: {', '.join(str(p) for p in get_nltk_data_paths())}",
         )
         return False
     return True
