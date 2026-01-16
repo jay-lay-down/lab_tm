@@ -1992,23 +1992,24 @@ class TextMiningApp(QMainWindow):
             return
 
         translators = {}
-        for code in set(value_to_lang.values()):
-            if code == "en":
-                continue
-            model_path = self.find_argos_model_path(code, "en")
-            if model_path is None:
-                QMessageBox.warning(
-                    self,
-                    "모델 누락",
-                    f"{code} → en 모델을 찾을 수 없습니다.\n"
-                    f"폴더: {', '.join(str(p) for p in self.get_argos_model_paths())}",
-                )
-                return
-            translator = argos_translate.get_translation_from_codes(code, "en")
-            if translator is None:
-                QMessageBox.warning(self, "번역기 초기화 실패", f"{code} → en 번역기 생성 실패")
-                return
-            translators[code] = translator
+        try:
+            argos_package.update_package_index()
+            for code in set(value_to_lang.values()):
+                if code == "en":
+                    continue
+                translator = argos_translate.get_translation_from_codes(code, "en")
+                if translator is None:
+                    QMessageBox.warning(
+                        self,
+                        "모델 로드 실패",
+                        "번역 모델을 찾을 수 없습니다: "
+                        f"{code} -> en\nEXE와 같은 폴더의 argos_packages 폴더를 확인하세요.",
+                    )
+                    return
+                translators[code] = translator
+        except Exception as e:
+            QMessageBox.warning(self, "오류", f"번역기 초기화 실패: {e}")
+            return
 
         df = self.df_clean.copy()
         target_col = "full_text" if self.chk_translate_overwrite.isChecked() else "full_text_en"
@@ -2018,14 +2019,19 @@ class TextMiningApp(QMainWindow):
         subset = df.loc[mask, ["full_text", self.language_column]]
 
         translated_texts = []
-        for _, row in subset.iterrows():
+        for idx, (_, row) in enumerate(subset.iterrows()):
+            if idx % 10 == 0:
+                QApplication.processEvents()
             lang_code = value_to_lang.get(str(row[self.language_column]))
             text = row["full_text"]
             if lang_code == "en" or not isinstance(text, str):
                 translated_texts.append(text)
                 continue
             translator = translators.get(lang_code)
-            translated_texts.append(translator.translate(text) if translator else text)
+            try:
+                translated_texts.append(translator.translate(text) if translator else text)
+            except Exception:
+                translated_texts.append(text)
 
         df.loc[mask, target_col] = translated_texts
         self.df_clean = df
