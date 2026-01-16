@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -19,7 +20,19 @@ def _setup_runtime_paths():
 
 _setup_runtime_paths()
 
-import importlib.util
+if importlib.util.find_spec("argostranslate.sbd") is not None:
+    import argostranslate.sbd
+
+    class DummySentencizer:
+        def __init__(self, package):
+            pass
+
+        def split_sentences(self, text):
+            return [text]
+
+    argostranslate.sbd.StanzaSentencizer = DummySentencizer
+    argostranslate.sbd.SpacySentencizer = DummySentencizer
+
 import itertools
 import json
 import random
