@@ -1966,7 +1966,6 @@ class TextMiningApp(QMainWindow):
         if importlib.util.find_spec("argostranslate") is None:
             QMessageBox.warning(self, "번역 엔진 없음", "Argos Translate가 설치되어 있지 않습니다.")
             return
-        from argostranslate import package as argos_package
         from argostranslate import translate as argos_translate
 
         self.language_column = self.get_language_column()
